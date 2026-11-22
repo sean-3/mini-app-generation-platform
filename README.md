@@ -65,7 +65,7 @@ docker compose logs -f api
 docker compose down # 数据留在./data，下次 up 还在
 ```
 
-镜像是多阶段构建（node:24-alpine）：先编 api + web，再只留生产依赖；带 `HEALTHCHECK`（`/health`）；`VOLUME /app/data`。前端由 NestJS 同源 serve，**一个链接就能打开**，不用分开部署。
+镜像是多阶段构建（node:24-alpine）：先编 api + web，再只留生产依赖；带 `HEALTHCHECK`（`/health`）；数据目录 `/app/data` 由外部挂载的 volume 提供（不写 `VOLUME` 指令，Railway 会拒绝它）。前端由 NestJS 同源 serve，**一个链接就能打开**，不用分开部署。
 
 分离部署（前端 Vercel + 后端容器）也行：前端 `npm run build --workspace=apps/web` 后部署 `apps/web/dist`，把 `apps/web/vite.config.ts` 里的 proxy 目标改成后端公网地址；后端照常 `docker compose up`。提交时优先给单体链接。
 
