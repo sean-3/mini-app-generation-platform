@@ -7,7 +7,8 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function Ledger({ app, onSaved }: { app: AppRow; onSaved: (a: AppRow) => void }) {
+function Ledger({ app, onSaved }: { app: AppRow; onSaved?: (a: AppRow) => void }) {
+  const editable = !!onSaved;
   const data = JSON.parse(app.data_json) as { records: Array<{ id: string; amount: number; category: string; date: string; note?: string }> };
   const [amount, setAmount] = useState('');
   const [category, setCategory] = useState('餐饮');
@@ -18,7 +19,7 @@ function Ledger({ app, onSaved }: { app: AppRow; onSaved: (a: AppRow) => void })
 
   const add = async () => {
     const v = Number(amount);
-    if (!v || v <= 0) return;
+    if (!onSaved || !v || v <= 0) return;
     const next = { ...data, records: [...data.records, { id: `r${Date.now()}`, amount: v, category, date: today(), note }] };
     onSaved(await api.updateAppData(app.id, next));
     setAmount('');
@@ -39,23 +40,25 @@ function Ledger({ app, onSaved }: { app: AppRow; onSaved: (a: AppRow) => void })
           ))}
         </tbody>
       </table>
-      <div className="form-grid" style={{ marginTop: 10 }}>
+      {editable && <div className="form-grid" style={{ marginTop: 10 }}>
         <input className="input" type="number" placeholder="金额" value={amount} onChange={(e) => setAmount(e.target.value)} />
         <select className="input" value={category} onChange={(e) => setCategory(e.target.value)}>
           {['餐饮', '交通', '购物', '娱乐', '其他'].map((c) => <option key={c}>{c}</option>)}
         </select>
         <input className="input full" placeholder="备注（可选）" value={note} onChange={(e) => setNote(e.target.value)} />
         <button className="btn primary full" onClick={add}>记一笔</button>
-      </div>
+      </div>}
     </div>
   );
 }
 
 const WEEK = ['一', '二', '三', '四', '五', '六', '日'];
 
-function Habit({ app, onSaved }: { app: AppRow; onSaved: (a: AppRow) => void }) {
+function Habit({ app, onSaved }: { app: AppRow; onSaved?: (a: AppRow) => void }) {
+  const editable = !!onSaved;
   const data = JSON.parse(app.data_json) as { habits: Array<{ id: string; name: string; streak: number; week: boolean[] }> };
   const toggle = async (id: string, i: number) => {
+    if (!onSaved) return;
     const next = {
       ...data,
       habits: data.habits.map((h) => {
@@ -75,19 +78,20 @@ function Habit({ app, onSaved }: { app: AppRow; onSaved: (a: AppRow) => void }) 
           <div className="kv"><span><b>{h.name}</b></span><span>连续 {h.streak} 天</span></div>
           <div className="week">
             {h.week.map((done, i) => (
-              <button key={i} className={done ? 'on' : ''} onClick={() => toggle(h.id, i)} title={`周${WEEK[i]}`}>
+              <button key={i} className={done ? 'on' : ''} disabled={!editable} onClick={() => toggle(h.id, i)} title={`周${WEEK[i]}`}>
                 {WEEK[i]}
               </button>
             ))}
           </div>
         </div>
       ))}
-      <p className="small">点一下格子就打卡 / 取消，连续天数跟着变。</p>
+      {editable && <p className="small">点一下格子就打卡 / 取消，连续天数跟着变。</p>}
     </div>
   );
 }
 
-function Quote({ app, onSaved }: { app: AppRow; onSaved: (a: AppRow) => void }) {
+function Quote({ app, onSaved }: { app: AppRow; onSaved?: (a: AppRow) => void }) {
+  const editable = !!onSaved;
   const data = JSON.parse(app.data_json) as { rows: Array<{ id: string; item: string; qty: number; price: number }> };
   const [item, setItem] = useState('');
   const [qty, setQty] = useState('1');
@@ -95,7 +99,7 @@ function Quote({ app, onSaved }: { app: AppRow; onSaved: (a: AppRow) => void }) 
   const total = data.rows.reduce((s, r) => s + r.qty * r.price, 0);
 
   const add = async () => {
-    if (!item.trim() || !(Number(price) >= 0) || !(Number(qty) > 0)) return;
+    if (!onSaved || !item.trim() || !(Number(price) >= 0) || !(Number(qty) > 0)) return;
     const next = { ...data, rows: [...data.rows, { id: `q${Date.now()}`, item: item.trim(), qty: Number(qty), price: Number(price) }] };
     onSaved(await api.updateAppData(app.id, next));
     setItem('');
@@ -103,9 +107,11 @@ function Quote({ app, onSaved }: { app: AppRow; onSaved: (a: AppRow) => void }) 
     setPrice('');
   };
   const remove = async (id: string) => {
+    if (!onSaved) return;
     onSaved(await api.updateAppData(app.id, { ...data, rows: data.rows.filter((r) => r.id !== id) }));
   };
   const editQty = async (id: string, delta: number) => {
+    if (!onSaved) return;
     const next = { ...data, rows: data.rows.map((r) => (r.id === id ? { ...r, qty: Math.max(1, r.qty + delta) } : r)) };
     onSaved(await api.updateAppData(app.id, next));
   };
@@ -119,29 +125,34 @@ function Quote({ app, onSaved }: { app: AppRow; onSaved: (a: AppRow) => void }) 
             <tr key={r.id}>
               <td>{r.item}</td>
               <td>
-                <button className="btn" style={{ padding: '0 8px', minHeight: 28 }} onClick={() => editQty(r.id, -1)}>−</button>
-                {' '}{r.qty}{' '}
-                <button className="btn" style={{ padding: '0 8px', minHeight: 28 }} onClick={() => editQty(r.id, 1)}>＋</button>
+                {editable ? (
+                  <>
+                    <button className="btn" style={{ padding: '0 8px', minHeight: 28 }} onClick={() => editQty(r.id, -1)}>−</button>
+                    {' '}{r.qty}{' '}
+                    <button className="btn" style={{ padding: '0 8px', minHeight: 28 }} onClick={() => editQty(r.id, 1)}>＋</button>
+                  </>
+                ) : r.qty}
               </td>
               <td>¥{r.price}</td>
               <td>¥{(r.qty * r.price).toFixed(0)}</td>
-              <td><button className="btn danger" style={{ padding: '0 8px', minHeight: 28 }} onClick={() => remove(r.id)}>删</button></td>
+              <td>{editable && <button className="btn danger" style={{ padding: '0 8px', minHeight: 28 }} onClick={() => remove(r.id)}>删</button>}</td>
             </tr>
           ))}
         </tbody>
       </table>
       <div className="kv"><span>总价</span><b>¥{total.toFixed(0)}</b></div>
-      <div className="form-grid" style={{ marginTop: 10 }}>
+      {editable && <div className="form-grid" style={{ marginTop: 10 }}>
         <input className="input" placeholder="项目" value={item} onChange={(e) => setItem(e.target.value)} />
         <input className="input" type="number" placeholder="单价" value={price} onChange={(e) => setPrice(e.target.value)} />
         <input className="input" type="number" placeholder="数量" value={qty} onChange={(e) => setQty(e.target.value)} />
         <button className="btn primary" onClick={add}>加一行</button>
-      </div>
+      </div>}
     </div>
   );
 }
 
-function Signup({ app, onSaved, cap }: { app: AppRow; onSaved: (a: AppRow) => void; cap: number }) {
+function Signup({ app, onSaved, cap }: { app: AppRow; onSaved?: (a: AppRow) => void; cap: number }) {
+  const editable = !!onSaved;
   const data = JSON.parse(app.data_json) as { signups: Array<{ id: string; name: string; count: number; note?: string }> };
   const [name, setName] = useState('');
   const [count, setCount] = useState('1');
@@ -151,7 +162,7 @@ function Signup({ app, onSaved, cap }: { app: AppRow; onSaved: (a: AppRow) => vo
 
   const join = async () => {
     const n = Number(count);
-    if (!name.trim() || !(n > 0)) return;
+    if (!onSaved || !name.trim() || !(n > 0)) return;
     if (total + n > cap) {
       setBlocked(true);
       return;
@@ -176,17 +187,17 @@ function Signup({ app, onSaved, cap }: { app: AppRow; onSaved: (a: AppRow) => vo
         </tbody>
       </table>
       {blocked && <div className="intercept" style={{ marginTop: 10 }}><h3>人数已满</h3><p>再加 {count} 人会超过上限 {cap} 人，本次报名没有写入。</p></div>}
-      <div className="form-grid" style={{ marginTop: 10 }}>
+      {editable && <div className="form-grid" style={{ marginTop: 10 }}>
         <input className="input" placeholder="姓名" value={name} onChange={(e) => setName(e.target.value)} />
         <input className="input" type="number" placeholder="人数" value={count} onChange={(e) => setCount(e.target.value)} />
         <input className="input full" placeholder="备注（可选）" value={note} onChange={(e) => setNote(e.target.value)} />
         <button className="btn primary full" onClick={join}>报名</button>
-      </div>
+      </div>}
     </div>
   );
 }
 
-export function AppPreview({ app, onSaved }: { app: AppRow; onSaved: (a: AppRow) => void }) {
+export function AppPreview({ app, onSaved }: { app: AppRow; onSaved?: (a: AppRow) => void }) {
   switch (app.template_id) {
     case 'ledger':
       return <Ledger app={app} onSaved={onSaved} />;

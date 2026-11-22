@@ -9,6 +9,10 @@ export interface AppRow {
   name: string;
   template_id: string;
   data_json: string;
+  /** 线上快照：最后一次 Publish / Update 时的数据；null = 从未发布。 */
+  published_json: string | null;
+  /** 线上版本号：首次发布 v1，每次 Update +1；0 = 从未发布。 */
+  published_version: number;
   created_at: string;
   updated_at: string;
 }
@@ -22,8 +26,8 @@ export class AppsService {
     private readonly gatewayService: ToolGatewayService,
   ) {}
 
-  list(): Array<{ id: string; name: string; template_id: string; created_at: string }> {
-    return this.db.query('SELECT id, name, template_id, created_at FROM apps ORDER BY created_at DESC');
+  list(): Array<{ id: string; name: string; template_id: string; published_version: number; created_at: string }> {
+    return this.db.query('SELECT id, name, template_id, published_version, created_at FROM apps ORDER BY created_at DESC');
   }
 
   get(id: string): AppRow {
@@ -38,13 +42,33 @@ export class AppsService {
     const id = randomUUID();
     const now = new Date().toISOString();
     this.db.run(
-      'INSERT INTO apps (id, name, template_id, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT INTO apps (id, name, template_id, data_json, published_json, published_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       id,
       name || t.name,
       templateId,
       JSON.stringify(t.seed()),
+      null,
+      0,
       now,
       now,
+    );
+    return this.get(id);
+  }
+
+  /**
+   * Update（对应 Atoms 的 Update）：把当前工作区数据推成新的线上版。
+   * data_json 是工作区（Preview），published_json 是线上快照；改数据只动工作区，
+   * 只有点 Update 才会更新线上版并把版本号 +1。首次发布也是走这里，v0 → v1。
+   */
+  publishUpdate(id: string): AppRow {
+    const app = this.get(id);
+    const nextVersion = (app.published_version ?? 0) + 1;
+    this.db.run(
+      'UPDATE apps SET published_json = ?, published_version = ?, updated_at = ? WHERE id = ?',
+      app.data_json,
+      nextVersion,
+      new Date().toISOString(),
+      id,
     );
     return this.get(id);
   }

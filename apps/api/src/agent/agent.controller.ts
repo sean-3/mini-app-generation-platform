@@ -12,8 +12,9 @@ export class AgentController {
   ) {}
 
   @Post()
-  create(@Body() body: { input: string }) {
-    return this.agent.createRun(body.input ?? '');
+  create(@Body() body: { input: string; mode?: string; teamMode?: boolean }) {
+    const mode = body.mode === 'plan' || body.mode === 'engineer' ? body.mode : 'build';
+    return this.agent.createRun(body.input ?? '', { mode, teamMode: body.teamMode === true });
   }
 
   @Post('repeat-demo')
@@ -34,6 +35,11 @@ export class AgentController {
   @Get(':id/replay')
   replay(@Param('id') id: string) {
     return this.agent.getReplay(id);
+  }
+
+  @Post(':id/approve-plan')
+  approvePlan(@Param('id') id: string, @Body() body: { approved: boolean }) {
+    return this.agent.approvePlan(id, body.approved === true);
   }
 
   @Post(':id/approve-architecture')

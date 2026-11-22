@@ -25,6 +25,12 @@ export class AppsController {
     return this.apps.updateData(id, body.data);
   }
 
+  /** Update：把当前工作区数据推成新的线上版（版本号 +1）。 */
+  @Post(':id/update')
+  publishUpdate(@Param('id') id: string) {
+    return this.apps.publishUpdate(id);
+  }
+
   @Patch(':id')
   rename(@Param('id') id: string, @Body() body: { name: string }) {
     return this.apps.rename(id, body.name);

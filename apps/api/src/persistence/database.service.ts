@@ -69,6 +69,22 @@ export class DatabaseService implements OnModuleInit {
         created_at TEXT NOT NULL
       );
     `);
+
+    // v3 迁移：已部署的数据库没有这些列，ALTER 失败（列已存在）时忽略。
+    // runs.mode/team_mode/plan_json：Build / Plan / Engineer 三种启动方式 + Team Mode 开关 + 计划；
+    // apps.published_json/published_version：Preview 与上线分离（上线快照 + 版本号）。
+    const addColumn = (sql: string) => {
+      try {
+        this.db.exec(sql);
+      } catch {
+        /* column already exists */
+      }
+    };
+    addColumn('ALTER TABLE runs ADD COLUMN mode TEXT');
+    addColumn('ALTER TABLE runs ADD COLUMN team_mode INTEGER DEFAULT 0');
+    addColumn('ALTER TABLE runs ADD COLUMN plan_json TEXT');
+    addColumn('ALTER TABLE apps ADD COLUMN published_json TEXT');
+    addColumn('ALTER TABLE apps ADD COLUMN published_version INTEGER DEFAULT 0');
   }
 
   query<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {

@@ -5,6 +5,7 @@ import { ToolGatewayService } from '../src/tool-gateway/tool-gateway.service';
 import { EvalService } from '../src/eval/eval.service';
 import { RunEventHub } from '../src/agent/run-hub';
 import { AgentService } from '../src/agent/agent.service';
+import { AppsService } from '../src/apps/apps.service';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -65,7 +66,7 @@ describe('AgentService end-to-end (real DeepAgents loop)', () => {
     const app = db.get<{ template_id: string }>('SELECT template_id FROM apps WHERE id = ?', done.app_id!);
     expect(app?.template_id).toBe('signup');
 
-    // Tina + David run async after publish; eval lands shortly after.
+    // 冒烟 + 评估在发布后异步跑，eval 随后落库。
     await waitFor(() => agent.getReplay(run.id).eval !== null);
     const replay = agent.getReplay(run.id);
     expect(replay.traces.length).toBeGreaterThan(5);
@@ -86,6 +87,94 @@ describe('AgentService end-to-end (real DeepAgents loop)', () => {
     const traces = db.query<{ result_json: string }>("SELECT result_json FROM traces WHERE run_id = ? AND kind = 'stage'", run.id);
     expect(traces[0]?.result_json).toContain('未匹配');
   });
+
+  it('plan mode: plan approval gate, then full flow to published', async () => {
+    const run = agent.createRun('记账看板', { mode: 'plan', teamMode: true });
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_plan');
+    const plan = JSON.parse(agent.getRun(run.id).plan_json ?? '{}');
+    expect(plan.templateId).toBe('ledger');
+    expect(plan.team).toContain('Bob');
+    expect(plan.approvals).toEqual(['计划', '架构', '发布']);
+
+    agent.approvePlan(run.id, true);
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_architecture');
+    agent.approveArchitecture(run.id, true);
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_publish');
+    agent.approvePublish(run.id, true);
+    await waitFor(() => agent.getRun(run.id).status === 'published');
+    const done = agent.getRun(run.id);
+    const app = db.get<{ published_version: number; published_json: string }>(
+      'SELECT published_version, published_json FROM apps WHERE id = ?',
+      done.app_id!,
+    );
+    expect(app?.published_version).toBe(1);
+    expect(app?.published_json).toBeTruthy();
+  }, 60_000);
+
+  it('plan rejection rolls back', async () => {
+    const run = agent.createRun('记账看板', { mode: 'plan' });
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_plan');
+    agent.approvePlan(run.id, false);
+    expect(agent.getRun(run.id).status).toBe('rolled_back');
+  }, 60_000);
+
+  it('team mode on: 5-person flow, no other role names in traces', async () => {
+    const run = agent.createRun('习惯打卡', { mode: 'build', teamMode: true });
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_architecture');
+    const afterA = agent.getRun(run.id);
+    // 设计是 Bob 架构输出的一部分，不再有独立的设计角色。
+    expect(JSON.parse(afterA.architecture_json ?? '{}').design?.layout).toBeTruthy();
+    agent.approveArchitecture(run.id, true);
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_publish');
+    agent.approvePublish(run.id, true);
+    await waitFor(() => agent.getRun(run.id).status === 'published');
+    await waitFor(() => agent.getReplay(run.id).eval !== null);
+    const actors = db.query<{ actor: string }>('SELECT DISTINCT actor FROM traces WHERE run_id = ?', run.id).map((r) => r.actor.toLowerCase());
+    for (const banned of ['nora', 'tina', 'oscar', 'david']) {
+      expect(actors).not.toContain(banned);
+    }
+  }, 60_000);
+
+  it('engineer mode: Alex alone, draft ready at architecture approval, skips stage B', async () => {
+    const run = agent.createRun('报价计算器', { mode: 'engineer' });
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_architecture');
+    const afterA = agent.getRun(run.id);
+    expect(afterA.team_mode).toBe(0);
+    expect(JSON.parse(afterA.draft_json ?? '{}').templateId).toBe('quote');
+    agent.approveArchitecture(run.id, true);
+    // 草稿已在，跳过 Stage B，直接等发布审批。
+    expect(agent.getRun(run.id).status).toBe('awaiting_publish');
+    agent.approvePublish(run.id, true);
+    await waitFor(() => agent.getRun(run.id).status === 'published');
+  }, 60_000);
+
+  it('publish/update: edit after publish does not touch the live snapshot until Update', async () => {
+    const apps = new AppsService(db, new TemplatesService(), new ToolGatewayService());
+    const run = agent.createRun('小区团购接龙');
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_architecture');
+    agent.approveArchitecture(run.id, true);
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_publish');
+    agent.approvePublish(run.id, true);
+    await waitFor(() => agent.getRun(run.id).status === 'published');
+    const appId = agent.getRun(run.id).app_id!;
+    const v1 = apps.get(appId);
+    expect(v1.published_version).toBe(1);
+    expect(v1.published_json).toBe(v1.data_json);
+
+    // 改数据：只动工作区，线上快照不动。
+    const data = JSON.parse(v1.data_json);
+    data.signups.push({ id: 's99', name: '测试', count: 1, note: '' });
+    const edited = apps.updateData(appId, data);
+    expect(JSON.parse(edited.data_json).signups.length).toBe(7);
+    expect(edited.published_json).toBe(v1.published_json);
+    expect(edited.published_version).toBe(1);
+
+    // Update：线上版更新，版本号 +1。
+    const v2 = apps.publishUpdate(appId);
+    expect(v2.published_version).toBe(2);
+    expect(v2.published_json).toBe(v2.data_json);
+    expect(JSON.parse(v2.published_json).signups.length).toBe(7);
+  }, 60_000);
 
   it('repeat demo: gateway blocks the 3rd identical call and stops the run', async () => {
     const run = agent.repeatDemo('团购接龙');
