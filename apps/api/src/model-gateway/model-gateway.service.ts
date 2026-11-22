@@ -3,6 +3,9 @@ import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { DeterministicModel, type PlanStep } from './deterministic-model';
 import { TemplatesService } from '../templates/templates.service';
+// 副作用 import：第一次 createDeepAgent 之前注册 Kimi 的 harness profile，
+// 把 ls / glob / grep 等文件系统工具从 Agent 的工具列表里拿掉（见 harness-profile.ts）。
+import './harness-profile';
 
 /**
  * Model Gateway：模型路由。

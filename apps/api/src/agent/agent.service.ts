@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { createDeepAgent, createSubAgent } from 'deepagents';
-import { todoListMiddleware } from 'langchain';
+import { createMiddleware, todoListMiddleware } from 'langchain';
 import { HumanMessage } from '@langchain/core/messages';
 import { randomUUID } from 'crypto';
 import { DatabaseService } from '../persistence/database.service';
@@ -47,6 +47,38 @@ export interface RunRow {
 // 框架在 getSubagents 里按 agentParams.name 去重会报 `Duplicate subagent name 'undefined'`。
 // 这里直接返回 spec，让框架内部编译。
 const subAgent = (spec: Parameters<typeof createSubAgent>[0]) => spec as any;
+
+/** 自定义工具全集（主 Agent 协调时可用；子 Agent 只拿自己那几个）。 */
+const ALL_CUSTOM_TOOLS = [
+  'match_template',
+  'read_template',
+  'save_draft',
+  'validate_schema',
+  'export_json',
+  'run_smoke_tests',
+  'compute_eval',
+  'check_health',
+  'list_apps',
+  'task',
+];
+
+/**
+ * 各阶段系统提示共用的工具规则。线上实测（run df4df137）里模型调了不存在的
+ * ls / glob / grep，被网关拦下后不收手、换别的工具继续试，save_draft 重复
+ * 调了 4 次，run 卡在 generating。三道防线：
+ * 1) harness profile 已把文件系统工具从 Agent 的工具列表里拿掉（只剩框架
+ *    强制保留的 read_file）；2) 这里再写明禁掉和出错后的规矩；3) 网关注册表
+ *    拦下时的消息也写明别换工具试。
+ */
+function toolRules(tools: string[]): string {
+  return (
+    '\nTool rules:\n' +
+    `- The ONLY tools that exist in this environment are: ${tools.join(', ')} (plus write_todos for planning). ` +
+    'There is no filesystem and no shell: ls, read_file, write_file, edit_file, delete, glob, grep, execute do not exist. Never call them, never look for files.\n' +
+    '- Follow the numbered steps in order, each exactly once. No extra exploration.\n' +
+    '- If a tool call returns {"isError": true, ...}: do NOT switch to a different tool. Either retry the SAME call once with corrected arguments, or finish with the results you already have and output the final JSON. Never retry the same failed call more than once. Never call save_draft twice with the same arguments.\n'
+  );
+}
 
 /** 每个阶段的模型上下文：给单测的确定性剧本定位用，也写进 system prompt 的事实。 */
 interface PhaseCtx {
@@ -265,7 +297,7 @@ export class AgentService {
 
   /** Plan 模式：Mike 先出计划（目标、模板、步骤、参与的人、三道审批），等用户批准。 */
   private async executePlan(runId: string, input: string, templateId: string, teamMode: boolean): Promise<void> {
-    const { middleware, tools } = this.buildAgentParts(runId);
+    const { middleware, usageMiddleware, tools } = this.buildAgentParts(runId);
     const toolList = Object.values(tools);
     const template = this.templates.get(templateId as TemplateId)!;
     const team = teamMode ? ['Mike', 'Iris', 'Emma', 'Bob', 'Alex'] : ['Mike', 'Alex'];
@@ -273,7 +305,7 @@ export class AgentService {
     const agent = createDeepAgent({
       model: this.modelGateway.createModel('plan', { input, templateId, teamMode, templates: this.templates }),
       tools: toolList,
-      middleware: [middleware, todoListMiddleware()],
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
       systemPrompt:
         'You are Mike, the coordinator of a 5-person app-building team (Iris research, Emma PM, Bob architect, Alex developer; you coordinate).\n' +
         'Phase: make a build plan for the user request.\n' +
@@ -284,12 +316,12 @@ export class AgentService {
         '"steps": ["调研","规格","架构","构建","发布"], "team": ["Mike","Iris","Emma","Bob","Alex"] or ["Mike","Alex"], ' +
         '"approvals": ["计划","架构","发布"], "notes": ["<short note>", ...]}\n' +
         'If match_template returns templateId null, the request is outside the four templates: ' +
-        'reply with ONLY {"templateId": null, "reason": "<why it does not fit>"} and stop.',
+        'reply with ONLY {"templateId": null, "reason": "<why it does not fit>"} and stop.' +
+        toolRules(['match_template', 'read_template']),
     });
 
     this.hub.emit(runId, 'stage_started', 'Mike', { stage: 'plan', label: 'Mike 出计划' });
     const result = await agent.invoke({ messages: [new HumanMessage(`出计划：${input}。本地规则初步匹配：${template.name}（${templateId}），如你的判断不同，以你的判断为准。`)] });
-    this.recordUsage(runId, result.messages as any[]);
     const plan = this.extractJsonFromMessages(result.messages as any[]);
     if (!plan || typeof plan.templateId !== 'string' || !this.templates.get(plan.templateId)) {
       this.failRun(runId, `模型未输出有效计划 JSON（templateId 缺失或不在四个模板内），停下。`);
@@ -311,7 +343,7 @@ export class AgentService {
   private async executeStageA(runId: string, input: string, templateId: string, teamMode: boolean): Promise<void> {
     if (!teamMode) return this.executeStageASimple(runId, input, templateId);
 
-    const { middleware, tools } = this.buildAgentParts(runId);
+    const { middleware, usageMiddleware, tools } = this.buildAgentParts(runId);
     const toolList = Object.values(tools);
 
     const irisEmma = subAgent({
@@ -324,9 +356,10 @@ export class AgentService {
         '{"templateId": "<one of ledger|habit|quote|signup>", "confidence": <0-1>, ' +
         '"requirements": ["<requirement>", ...]}\n' +
         'Requirements must cover: what the app does, data persists in the backend after refresh, ' +
-        'field validation, empty and error states.',
+        'field validation, empty and error states.' +
+        toolRules(['match_template']),
       mode: 'isolated',
-      middleware: [middleware, todoListMiddleware()],
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
       tools: [tools.matchTemplate],
       model: this.modelGateway.createModel('stageA-iris-emma', { input, templateId, teamMode, templates: this.templates }),
     });
@@ -341,9 +374,10 @@ export class AgentService {
         '{"templateId": "<id>", "storage": "apps 表，data_json 字段；草稿先写 drafts 表，审批通过后转正", ' +
         '"tools": ["match_template","save_draft","validate_schema"], "approvals": ["architecture","publish"], ' +
         '"design": {"layout": "<where the app sits, where the timeline sits>", ' +
-        '"tokens": {"primary": "#2563eb", "surface": "#ffffff", "muted": "#f5f5f4"}, "notes": ["<design note>", ...]}}',
+        '"tokens": {"primary": "#2563eb", "surface": "#ffffff", "muted": "#f5f5f4"}, "notes": ["<design note>", ...]}}' +
+        toolRules(['read_template']),
       mode: 'isolated',
-      middleware: [middleware, todoListMiddleware()],
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
       tools: [tools.readTemplate],
       model: this.modelGateway.createModel('stageA-bob', { input, templateId, teamMode, templates: this.templates }),
     });
@@ -351,18 +385,18 @@ export class AgentService {
     const agent = createDeepAgent({
       model: this.modelGateway.createModel('stageA-main', { input, templateId, teamMode, templates: this.templates }),
       tools: toolList,
-      middleware: [middleware, todoListMiddleware()],
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
       subagents: [irisEmma, bob],
       systemPrompt:
         'You are Mike, the team coordinator. Delegate with the task tool, then summarize.\n' +
         '1) Use task to ask subagent iris_emma: research the request and write the requirements list (it calls match_template itself).\n' +
         '2) Use task to ask subagent bob: make the architecture decision including design notes (it calls read_template itself).\n' +
-        '3) When both results are back, reply with ONLY the text: stage A done',
+        '3) When both results are back, reply with ONLY the text: stage A done' +
+        toolRules(ALL_CUSTOM_TOOLS),
     });
 
     this.hub.emit(runId, 'stage_started', 'Mike', { stage: 'A', label: '需求 + 架构' });
     const result = await agent.invoke({ messages: [new HumanMessage(`生成应用：${input}`)] });
-    this.recordUsage(runId, result.messages as any[]);
     const taskResults = this.extractTaskResults(result.messages as any[]);
     const requirements = taskResults.iris_emma ?? null;
     const architecture = taskResults.bob ?? null;
@@ -382,13 +416,13 @@ export class AgentService {
 
   /** Stage A 简化版（Team Mode 关）：Mike 一人做匹配、需求、架构，不派 subagents。 */
   private async executeStageASimple(runId: string, input: string, templateId: string): Promise<void> {
-    const { middleware, tools } = this.buildAgentParts(runId);
+    const { middleware, usageMiddleware, tools } = this.buildAgentParts(runId);
     const toolList = Object.values(tools);
 
     const agent = createDeepAgent({
       model: this.modelGateway.createModel('stageA-simple', { input, templateId, teamMode: false, templates: this.templates }),
       tools: toolList,
-      middleware: [middleware, todoListMiddleware()],
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
       systemPrompt:
         'You are Mike, the team coordinator. Do the requirements + architecture yourself.\n' +
         '1) Call match_template with the user request.\n' +
@@ -397,12 +431,12 @@ export class AgentService {
         '{"templateId": "<one of ledger|habit|quote|signup>", "requirements": ["<requirement>", ...], ' +
         '"architecture": {"templateId": "<id>", "storage": "apps 表，data_json 字段；草稿先写 drafts 表，审批通过后转正", ' +
         '"tools": ["match_template","save_draft","validate_schema"], "approvals": ["architecture","publish"], ' +
-        '"design": {"layout": "<where the app sits, where the timeline sits>", "notes": ["<design note>", ...]}}}',
+        '"design": {"layout": "<where the app sits, where the timeline sits>", "notes": ["<design note>", ...]}}}' +
+        toolRules(['match_template', 'read_template']),
     });
 
     this.hub.emit(runId, 'stage_started', 'Mike', { stage: 'A', label: '需求 + 架构（简化）' });
     const result = await agent.invoke({ messages: [new HumanMessage(`生成应用：${input}`)] });
-    this.recordUsage(runId, result.messages as any[]);
     const out = this.extractJsonFromMessages(result.messages as any[]) ?? {};
     if (!out.requirements?.length || !out.architecture?.templateId || !this.templates.get(out.architecture.templateId)) {
       this.failRun(runId, 'Stage A 未产出有效需求或架构（模型输出缺字段或模板不对），停下。');
@@ -420,7 +454,7 @@ export class AgentService {
 
   /** Engineer 模式：只派 Alex 一人——匹配、生成草稿、自检一次做完，等架构审批。 */
   private async executeEngineer(runId: string, input: string, templateId: string): Promise<void> {
-    const { middleware, tools } = this.buildAgentParts(runId);
+    const { middleware, usageMiddleware, tools } = this.buildAgentParts(runId);
     const toolList = Object.values(tools);
     const template = this.templates.get(templateId as TemplateId)!;
     const appName = `${template.name} · ${input.slice(0, 12)}`;
@@ -434,9 +468,10 @@ export class AgentService {
         `2) Call save_draft with templateId and name "${appName}" (omit data to use the template default seed data).\n` +
         '3) Call validate_schema with the draftId from step 2.\n' +
         '4) Reply with ONLY a JSON object, no other text, no markdown fences:\n' +
-        '{"draftReady": <true if validate_schema says valid>, "valid": <bool>, "errors": [<strings>]}',
+        '{"draftReady": <true if validate_schema says valid>, "valid": <bool>, "errors": [<strings>]}' +
+        toolRules(['match_template', 'save_draft', 'validate_schema']),
       mode: 'isolated',
-      middleware: [middleware, todoListMiddleware()],
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
       tools: [tools.matchTemplate, tools.saveDraft, tools.validateSchema],
       model: this.modelGateway.createModel('engineer-alex', { input, templateId, teamMode: false, appName, templates: this.templates }),
     });
@@ -444,17 +479,17 @@ export class AgentService {
     const agent = createDeepAgent({
       model: this.modelGateway.createModel('engineer-main', { input, templateId, teamMode: false, appName, templates: this.templates }),
       tools: toolList,
-      middleware: [middleware, todoListMiddleware()],
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
       subagents: [alex],
       systemPrompt:
         'You are Mike, the team coordinator. Delegate everything to Alex, then summarize.\n' +
         'Use task to ask subagent alex to match the template, generate the draft and self-check it, ' +
-        'then reply with ONLY the text: engineer mode done',
+        'then reply with ONLY the text: engineer mode done' +
+        toolRules(ALL_CUSTOM_TOOLS),
     });
 
     this.hub.emit(runId, 'stage_started', 'Alex', { stage: 'engineer', label: 'Alex 一人构建' });
     const result = await agent.invoke({ messages: [new HumanMessage(`生成应用：${input}`)] });
-    this.recordUsage(runId, result.messages as any[]);
     const taskResults = this.extractTaskResults(result.messages as any[]);
     const draftRow = this.db.get<{ id: string; data_json: string }>(
       'SELECT id, data_json FROM drafts WHERE run_id = ? ORDER BY created_at DESC LIMIT 1',
@@ -489,7 +524,7 @@ export class AgentService {
     const run = this.getRun(runId);
     const templateId = run.template_id as TemplateId;
     const template = this.templates.get(templateId)!;
-    const { middleware, tools } = this.buildAgentParts(runId);
+    const { middleware, usageMiddleware, tools } = this.buildAgentParts(runId);
     const toolList = Object.values(tools);
     const appName = `${template.name} · ${run.input.slice(0, 12)}`;
 
@@ -501,9 +536,11 @@ export class AgentService {
         `1) Call save_draft with templateId "${templateId}" and name "${appName}" (omit data to use the template default seed data).\n` +
         '2) Call validate_schema with the draftId from step 1.\n' +
         '3) Reply with ONLY a JSON object, no other text, no markdown fences:\n' +
-        '{"draftReady": <true if validate_schema says valid>, "valid": <bool>, "errors": [<strings>]}',
+        '{"draftReady": <true if validate_schema says valid>, "valid": <bool>, "errors": [<strings>]}' +
+        toolRules(['save_draft', 'validate_schema']) +
+        'Fixed order for this stage: save_draft once, then validate_schema once, then the final JSON. Nothing else.\n',
       mode: 'isolated',
-      middleware: [middleware, todoListMiddleware()],
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
       tools: [tools.saveDraft, tools.validateSchema],
       model: this.modelGateway.createModel('stageB-alex', { input: run.input, templateId, teamMode: run.team_mode === 1, appName, templates: this.templates }),
     });
@@ -511,17 +548,17 @@ export class AgentService {
     const agent = createDeepAgent({
       model: this.modelGateway.createModel('stageB-main', { input: run.input, templateId, teamMode: run.team_mode === 1, appName, templates: this.templates }),
       tools: toolList,
-      middleware: [middleware, todoListMiddleware()],
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
       subagents: [alex],
       systemPrompt:
         'You are Mike, the team coordinator. Delegate generation to Alex, then summarize.\n' +
         'Use task to ask subagent alex to generate the draft and self-check it, ' +
-        'then reply with ONLY the text: stage B done',
+        'then reply with ONLY the text: stage B done' +
+        toolRules(ALL_CUSTOM_TOOLS),
     });
 
     this.hub.emit(runId, 'stage_started', 'Mike', { stage: 'B', label: '开发：生成草稿' });
     const result = await agent.invoke({ messages: [new HumanMessage(`生成草稿：${appName}`)] });
-    this.recordUsage(runId, result.messages as any[]);
     const taskResults = this.extractTaskResults(result.messages as any[]);
     const draftRow = this.db.get<{ id: string; data_json: string }>(
       'SELECT id, data_json FROM drafts WHERE run_id = ? ORDER BY created_at DESC LIMIT 1',
@@ -545,17 +582,18 @@ export class AgentService {
   private async executePublish(runId: string): Promise<void> {
     const run = this.getRun(runId);
     const draft = JSON.parse(run.draft_json ?? '{}');
-    const { middleware, tools } = this.buildAgentParts(runId);
+    const { middleware, usageMiddleware, tools } = this.buildAgentParts(runId);
     const toolList = Object.values(tools);
 
     const agent = createDeepAgent({
       model: this.modelGateway.createModel('publish', { input: run.input, templateId: run.template_id ?? '', teamMode: false, templates: this.templates }),
       tools: toolList,
-      middleware: [middleware, todoListMiddleware()],
-      systemPrompt: 'You are Mike, the team coordinator. Call check_health once, then reply with ONLY the text: health ok',
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
+      systemPrompt:
+        'You are Mike, the team coordinator. Call check_health once, then reply with ONLY the text: health ok' +
+        toolRules(['check_health']),
     });
-    const result = await agent.invoke({ messages: [new HumanMessage('publish checks')] });
-    this.recordUsage(runId, result.messages as any[]);
+    await agent.invoke({ messages: [new HumanMessage('publish checks')] });
 
     const appId = randomUUID();
     const now = new Date().toISOString();
@@ -579,17 +617,18 @@ export class AgentService {
   }
 
   private async executeReview(runId: string, appId: string): Promise<void> {
-    const { middleware, tools } = this.buildAgentParts(runId);
+    const { middleware, usageMiddleware, tools } = this.buildAgentParts(runId);
     const toolList = Object.values(tools);
 
     const agent = createDeepAgent({
       model: this.modelGateway.createModel('review', { input: '', templateId: '', teamMode: false, appId, runId, templates: this.templates }),
       tools: toolList,
-      middleware: [middleware, todoListMiddleware()],
-      systemPrompt: 'You are Mike, the team coordinator. Call run_smoke_tests with the appId, then compute_eval with the runId, then reply with ONLY the text: review done',
+      middleware: [middleware, usageMiddleware, todoListMiddleware()],
+      systemPrompt:
+        'You are Mike, the team coordinator. Call run_smoke_tests with the appId, then compute_eval with the runId, then reply with ONLY the text: review done' +
+        toolRules(['run_smoke_tests', 'compute_eval']),
     });
-    const result = await agent.invoke({ messages: [new HumanMessage('post-publish review')] });
-    this.recordUsage(runId, result.messages as any[]);
+    await agent.invoke({ messages: [new HumanMessage('post-publish review')] });
     const ev = this.evalService.latest(runId);
     this.hub.emit(runId, 'eval_ready', '评估', ev);
   }
@@ -602,8 +641,47 @@ export class AgentService {
       this.hub.emit(runId, 'tool', 'ToolGateway', t);
     });
     const middleware = createToolGatewayMiddleware(gateway);
+    const usageMiddleware = this.createUsageMiddleware(runId);
     const tools = buildTools({ db: this.db, templates: this.templates, evalService: this.evalService, runId });
-    return { gateway, middleware, tools };
+    return { gateway, middleware, usageMiddleware, tools };
+  }
+
+  /**
+   * token 用量中间件：每次模型调用返回后立刻把用量累计进 runs.usage_json。
+   * 之前只在阶段结束时从消息历史里算一次，run 卡住时看不到烧了多少
+   * （线上实测 run df4df137 卡在 Stage B 四分钟，usage 还是空的）。
+   * 主 Agent 和子 Agent 的中间件栈里都挂了它，所以子 Agent 的调用也实时
+   * 计入，不再是“下限”。这是用量唯一的写入者，阶段结束不再另算。
+   */
+  private createUsageMiddleware(runId: string) {
+    return createMiddleware({
+      name: 'UsageRecorder',
+      wrapModelCall: async (request: any, handler: any) => {
+        const res = await handler(request);
+        const responses = Array.isArray(res) ? res : [res];
+        for (const r of responses) {
+          const u = (r as any)?.usage_metadata ?? (r as any)?.response_metadata?.tokenUsage;
+          if (!u) continue;
+          const prompt = u.input_tokens ?? u.prompt_tokens ?? 0;
+          const completion = u.output_tokens ?? u.completion_tokens ?? 0;
+          if (prompt > 0 || completion > 0) this.accumulateUsage(runId, prompt, completion, 1);
+        }
+        return res;
+      },
+    });
+  }
+
+  /** 累计一次模型调用的 token 用量，写进 runs.usage_json（唯一写入处）。 */
+  private accumulateUsage(runId: string, promptTokens: number, completionTokens: number, modelCalls: number): void {
+    const prev = this.parseUsage(this.getRun(runId).usage_json);
+    this.updateRun(runId, {
+      usage_json: JSON.stringify({
+        promptTokens: prev.promptTokens + promptTokens,
+        completionTokens: prev.completionTokens + completionTokens,
+        totalTokens: prev.totalTokens + promptTokens + completionTokens,
+        modelCalls: prev.modelCalls + modelCalls,
+      }),
+    });
   }
 
   /** 阶段失败：状态 stopped，留一条错误轨迹和停下事件，不进审批。 */
@@ -623,34 +701,6 @@ export class AgentService {
     sets.push('updated_at = ?');
     params.push(new Date().toISOString());
     this.db.run(`UPDATE runs SET ${sets.join(', ')} WHERE id = ?`, ...params, id);
-  }
-
-  /**
-   * 累计一次 agent.invoke 里主 Agent 各轮调用的 token 用量，写进 runs.usage_json。
-   * 只计主 Agent 消息里的 usage_metadata；subagent 内部的调用不在主 Agent 的
-   * 消息历史里，所以 Team Mode 开时这个数字是下限，不是全量。
-   */
-  private recordUsage(runId: string, messages: any[]): void {
-    let prompt = 0;
-    let completion = 0;
-    let calls = 0;
-    for (const m of messages) {
-      const u = (m as any)?.usage_metadata ?? (m as any)?.response_metadata?.tokenUsage;
-      if (!u) continue;
-      calls += 1;
-      prompt += u.input_tokens ?? u.prompt_tokens ?? 0;
-      completion += u.output_tokens ?? u.completion_tokens ?? 0;
-    }
-    if (calls === 0) return;
-    const prev = this.parseUsage(this.getRun(runId).usage_json);
-    this.updateRun(runId, {
-      usage_json: JSON.stringify({
-        promptTokens: prev.promptTokens + prompt,
-        completionTokens: prev.completionTokens + completion,
-        totalTokens: prev.totalTokens + prompt + completion,
-        modelCalls: prev.modelCalls + calls,
-      }),
-    });
   }
 
   private parseUsage(json: string | null): { promptTokens: number; completionTokens: number; totalTokens: number; modelCalls: number } {

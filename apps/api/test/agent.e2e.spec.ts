@@ -78,6 +78,17 @@ describe('AgentService end-to-end (real DeepAgents loop)', () => {
     expect(replay.eval!.successRate).toBeGreaterThan(0.5);
   }, 60_000);
 
+  it('usage is recorded after each model call, not only at stage end', async () => {
+    // 线上实测 run df4df137 卡在 Stage B 四分钟，usage 还是空的——之前只在
+    // 阶段结束时算一次。现在每次模型调用返回后中间件立刻累计，卡住也能看到烧了多少。
+    const run = agent.createRun('小区团购接龙');
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_architecture');
+    const usage = JSON.parse(agent.getRun(run.id).usage_json ?? '{}');
+    expect(usage.modelCalls).toBeGreaterThan(0);
+    expect(usage.totalTokens).toBeGreaterThan(0);
+    expect(usage.totalTokens).toBe(usage.promptTokens + usage.completionTokens);
+  }, 60_000);
+
   it('architecture rejection rolls back', async () => {
     const run = agent.createRun('记账看板');
     await waitFor(() => agent.getRun(run.id).status === 'awaiting_architecture');

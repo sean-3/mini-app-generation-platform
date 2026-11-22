@@ -45,6 +45,39 @@ describe('ToolGateway five steps', () => {
     expect(calls).toBe(0);
   });
 
+  it('registry block message tells the model not to try another tool instead', async () => {
+    const g = makeGateway();
+    const r = await g.execute('glob', { pattern: '**/*.ts' }, undefined, async () => ({ content: 'x' }));
+    expect(r.ok).toBe(false);
+    expect(JSON.parse(r.content).message).toContain('Do not try another tool as a substitute');
+  });
+
+  it('per-tool timeout: task gets a longer budget than the 10s default', async () => {
+    // task 是子代理派活，子代理内部还要调模型，10 秒必超时；300 秒是上限。
+    const g = new ToolGateway({
+      ...DEFAULT_POLICY,
+      allowedTools: new Set([...DEFAULT_POLICY.allowedTools, 'add', 'task']),
+      timeoutMs: 50,
+      toolTimeouts: { task: 500 },
+    });
+    const slow = async () => {
+      await new Promise((r) => setTimeout(r, 200));
+      return { content: 'slow ok' };
+    };
+    // 同样 200ms 的执行：task 在放宽后的预算内跑完，add 按默认预算超时。
+    const taskRes = await g.execute('task', { description: 'x', subagent_type: 'alex' }, undefined, slow);
+    expect(taskRes.ok).toBe(true);
+    const addRes = await g.execute('add', { a: 1, b: 2 }, addSchema, slow);
+    expect(addRes.ok).toBe(false);
+    expect(JSON.parse(addRes.content)).toMatchObject({ isError: true, step: 'execution' });
+    expect(JSON.parse(addRes.content).message).toContain('timed out after 50ms');
+  });
+
+  it('default policy: task timeout is 300s, everything else stays 10s', () => {
+    expect(DEFAULT_POLICY.timeoutMs).toBe(10_000);
+    expect(DEFAULT_POLICY.toolTimeouts?.task).toBe(300_000);
+  });
+
   it('step 4+5: execution errors become isError messages, never thrown', async () => {
     const g = makeGateway();
     const r = await g.execute('add', { a: 1, b: 2 }, addSchema, async () => {

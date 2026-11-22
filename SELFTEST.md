@@ -124,9 +124,32 @@ deepagents 1.17.0 `createMiddleware` + `wrapToolCall` 拦截：**通过 5/5**。
 
 1. **Nest 启动报 `UnknownDependenciesException`（真 bug，v4 自测发现）**：`ModelGatewayService` 的第二个构造参数是测试工厂（函数类型），生产装配不传；Nest 试图按 `Function` 类型注入，找不到 provider，服务起不来。修法：参数上加 `@Optional()`，容器里没有就注 `undefined`。修完重建、`curl /health` 200、自测全过。教训：可选的函数类型构造参数必须显式 `@Optional()`，不能只靠 TS 的 `?`。
 
+## v4 线上实测暴露的两个真 bug（run df4df137，Build 模式 Team 关，2026-11-23 01:52，Railway 已配 key）
+
+Stage A 真模型工作正常：匹配 signup 模板、出需求 + 架构，3 次调用、13,564 token。Stage B 卡住 4 分钟以上，run 一直停在 generating：
+
+1. **Bug 1：`task` 子代理调用两次都报 `Tool execution failed: tool task timed out after 10000ms`。**
+   根因不在 deepagents，在我们自己的网关：`ToolGateway.execute` 对所有工具都用同一个 10 秒超时，而 `task` 是子代理派活，子代理内部还要调几次模型，真模型一次调用 30–120 秒（含推理），10 秒必超时。
+   修法：网关加按工具区分的超时（`GatewayPolicy.toolTimeouts`），`task` 放宽到 300 秒，其他工具保持 10 秒。`task` 300 秒是上限，正常 30–120 秒内回来。单测：`tool-gateway.spec.ts` 里同样 200ms 的执行，task 跑完、普通工具按默认预算超时；默认策略 task=300_000、其他=10_000。
+2. **Bug 2：模型去调没注册的 DeepAgents 默认工具 `ls` / `glob` / `grep`，被网关拦下后不收手，换别的工具继续试，`save_draft` 重复调了 4 次。**
+   根因：deepagents 1.17.0 的 `createDeepAgent` 给主 Agent 和子 Agent 都挂 FilesystemMiddleware，默认带 ls / read_file / write_file / edit_file / delete / glob / grep / execute；确定性模型时代模型只调剧本里的工具，这个问题没暴露过。
+   修法（三道防线）：
+   - 新增 `model-gateway/harness-profile.ts`，注册 harness profile 把文件系统工具从 Agent 的工具列表里拿掉：`registerHarnessProfile('openai', { excludedTools: [ls, write_file, edit_file, delete, glob, grep, execute] })`，另加五个 Kimi 模型名的逐模型 key 做备用。注意一个坑：deepagents 按模型名查 profile 时只读 `model_name` / `modelName`，当前 @langchain/openai 的 ChatOpenAI 这两个字段都是 undefined（模型名只在 `model` 字段里），所以逐模型 key 查不到，真正生效的是 provider 层 "openai"。单测里实测过：第一次只注册逐模型 key 时，probe 抓到的工具列表里 ls / glob / grep 还在；补上 provider 层后才消失。
+   - 框架限制：FilesystemMiddleware 是必需中间件排不掉，`read_file` 是它强制保留的（排除列表为空时也会补回），所以 read_file 仍在工具列表里——它不在网关白名单里，调了会被拦下，系统提示里也写明禁掉。
+   - 各阶段系统提示加工具规则：只列本阶段有的工具；没有文件系统和 shell；按编号顺序各走一次；工具返回 isError 不许换工具试，同一次调用最多重试一次，save_draft 不许同参数调两次。Stage B 另写死顺序 save_draft → validate_schema → 最终 JSON。
+   - 网关注册表拦截的消息改成直接告诉模型：这个工具不存在，不要换别的工具试，按指令里的既定步骤继续。
+   单测：`harness-profile.spec.ts`——五个 Kimi 模型名 + openai provider 层的排除列表都断言过；真 ChatOpenAI kimi-k3 实例建的 Agent，wrapModelCall 抓到的工具列表里有自定义工具、没有 ls / glob / grep / write_file / edit_file / delete / execute（构造和绑定工具不联网，probe 在调模型前抛错拦住）。
+3. **顺带修：token 用量之前只在阶段结束才更新，卡住的 run 看不到烧了多少。** 改成 usage 中间件（`wrapModelCall`）每次模型调用返回后立刻累计进 `runs.usage_json`；主 Agent 和子 Agent 的中间件栈里都挂了它，子 Agent 的调用也实时计入，不再是“下限”。阶段结束不再另算（单写者，不会重复计）。确定性模型每条 AIMessage 带固定 usage（100 input / 50 output），单测里 E2E 断言 Stage A 结束后 usage_json 的 modelCalls 和 totalTokens 都大于 0。
+
+## v4 修复后复核（2026-11-23 02:05–02:06，端口 3104，DATA_DIR=/tmp/v4fix-verify-data，无 MOONSHOT_API_KEY）
+
+- 干净构建：`npm run build`，api + web 都通过。
+- 单测 **44/44**（7 个 suite）：37 个原有 + 7 个新增（网关分工具超时 2 个 + 注册表消息 1 个、harness profile 3 个、usage 增量记录 E2E 1 个）。
+- 真实 HTTP：`/health` 200（kimi-k3，`configured:false`）；首页 200；`POST /api/runs` 无 key 仍 400；repeat-demo 建 run 后 stopped，回放 3 条 trace，第三次 `match_template` 被 `repeat_call` 拦下（`is_error=1`）。
+
 ## v4 没验证的（写清楚，不编造）
 
-- **真模型循环本地没验证**：本机没有 `MOONSHOT_API_KEY`。`createCloudModel()` 返回 ChatOpenAI（kimi-k3、`https://api.moonshot.cn/v1`）只在单测里用假 key 断言过构造参数，没发过真实请求。部署后主 agent 在 Railway 上配好 `MOONSHOT_API_KEY` 再验：走一遍 Build 生成，看 token 用量、耗时、审批点是否正常，把结果补在这里。
+- **真模型循环本地没验证**：本机没有 `MOONSHOT_API_KEY`。`createCloudModel()` 返回 ChatOpenAI（kimi-k3、`https://api.moonshot.cn/v1`）只在单测里用假 key 断言过构造参数，没发过真实请求。部署后主 agent 在 Railway 上复测：走一遍 Build 生成，看 Stage B 的 task 派活是否在 300 秒内回来、模型还调不调 ls / glob / grep、save_draft 是否只调一次、usage_json 是否随调用实时涨，把结果补在这里。
 - docker compose 实机验证（本机无运行时；同 v3）。
 - 浏览器端点击级自测 + 360px 真机溢出验证（同 v3）。
 

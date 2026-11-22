@@ -61,10 +61,14 @@ export class DeterministicModel extends BaseChatModel {
     const turn = messages.filter((m) => m.getType() === 'ai').length;
     const step: PlanStep = this.plan[turn] ?? { type: 'text', text: 'done' };
     let ai: AIMessage;
+    // 固定 token 用量：让 usage 中间件在单测里也有东西可记（真模型由
+    // ChatOpenAI 在 usage_metadata 里回真实数字，这里只是固定值）。
+    const usage_metadata = { input_tokens: 100, output_tokens: 50, total_tokens: 150 };
     if (step.type === 'tool') {
       ai = new AIMessage({
         content: '',
         tool_calls: [{ id: `call_${turn + 1}_${step.name}`, name: step.name, args: step.args(messages) }],
+        usage_metadata,
       });
     } else if (step.type === 'tools') {
       ai = new AIMessage({
@@ -74,10 +78,11 @@ export class DeterministicModel extends BaseChatModel {
           name: c.name,
           args: c.args(messages),
         })),
+        usage_metadata,
       });
     } else {
       const text = typeof step.text === 'function' ? step.text(messages) : step.text;
-      ai = new AIMessage({ content: text });
+      ai = new AIMessage({ content: text, usage_metadata });
     }
     return { generations: [{ text: typeof ai.content === 'string' ? ai.content : '', message: ai }] };
   }

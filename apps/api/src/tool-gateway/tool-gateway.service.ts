@@ -34,6 +34,14 @@ export interface GatewayPolicy {
   maxNoProgress: number;
   /** Per-call execution timeout (ms). */
   timeoutMs: number;
+  /**
+   * Per-tool execution timeout overrides (ms).
+   * `task` is subagent delegation: the subagent runs its own model calls
+   * inside (a real model call takes 30–120s with reasoning), so the 10s
+   * default kills every delegation. 300s covers a subagent doing a few
+   * model calls; anything else keeps the 10s default.
+   */
+  toolTimeouts?: Record<string, number>;
 }
 
 export const DEFAULT_POLICY: GatewayPolicy = {
@@ -56,6 +64,9 @@ export const DEFAULT_POLICY: GatewayPolicy = {
   maxRepeats: 3,
   maxNoProgress: 3,
   timeoutMs: 10_000,
+  // task = 子代理派活，子代理内部还要调几次模型，10 秒必超时（线上实测 run df4df137：
+  // 两次 task 都报 `tool task timed out after 10000ms`）。300 秒是上限，正常 30–120 秒内回来。
+  toolTimeouts: { task: 300_000 },
 };
 
 /**
@@ -162,9 +173,15 @@ export class ToolGateway {
       Object.assign(args, parsed.data);
     }
 
-    // 注册表：未注册的工具不允许调用
+    // 注册表：未注册的工具不允许调用。消息写给模型看：这个工具在这个环境里
+    // 不存在，不要换一个别的工具接着试，按指令里的既定步骤继续。
     if (!this.policy.allowedTools.has(toolName)) {
-      return this.block('registry', toolName, `Tool ${toolName} is not registered in the gateway.`);
+      return this.block(
+        'registry',
+        toolName,
+        `Tool ${toolName} is not registered in the gateway and does not exist in this environment. ` +
+          `Do not try another tool as a substitute; continue with the planned steps using only the tools listed in your instructions.`,
+      );
     }
 
     // ③ 权限拦截：读/写/删分级；deniedTools 直接拒绝
@@ -193,14 +210,15 @@ export class ToolGateway {
       );
     }
 
-    // ④ 执行（带超时）
+    // ④ 执行（带超时；task 这类子代理派活按 toolTimeouts 放宽）
+    const timeoutMs = this.policy.toolTimeouts?.[toolName] ?? this.policy.timeoutMs;
     this.calls += 1;
     let execOut: { content: string; raw?: unknown };
     try {
       execOut = await Promise.race([
         exec(args),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`tool ${toolName} timed out after ${this.policy.timeoutMs}ms`)), this.policy.timeoutMs),
+          setTimeout(() => reject(new Error(`tool ${toolName} timed out after ${timeoutMs}ms`)), timeoutMs),
         ),
       ]);
     } catch (err: any) {
