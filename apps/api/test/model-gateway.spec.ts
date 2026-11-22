@@ -11,9 +11,35 @@ describe('ModelGatewayService', () => {
     expect(svc.routeLocal('在线商城').templateId).toBeNull();
   });
 
-  it('cloud slot: throws a clear error when not configured', () => {
-    expect(() => svc.createCloudModel()).toThrow(/not configured/);
+  it('cloud model: clear MOONSHOT_API_KEY error without a key', () => {
+    delete process.env.MOONSHOT_API_KEY;
     expect(svc.hasCloudModel()).toBe(false);
+    expect(() => svc.createCloudModel()).toThrow(/MOONSHOT_API_KEY/);
+    expect(() => svc.createModel('plan', { input: 'x', templateId: 'signup', teamMode: false })).toThrow(/MOONSHOT_API_KEY/);
+  });
+
+  it('cloud model: with a key it is ChatOpenAI kimi-k3 on the Moonshot China station', () => {
+    process.env.MOONSHOT_API_KEY = 'sk-test-key';
+    try {
+      expect(svc.hasCloudModel()).toBe(true);
+      const model: any = svc.createCloudModel();
+      expect(model.model).toBe('kimi-k3');
+      expect(model.clientConfig?.baseURL ?? model.clientConfig?.baseUrl).toBe('https://api.moonshot.cn/v1');
+      const viaGateway: any = svc.createModel('plan', { input: 'x', templateId: 'signup', teamMode: false });
+      expect(viaGateway.model).toBe('kimi-k3');
+    } finally {
+      delete process.env.MOONSHOT_API_KEY;
+    }
+  });
+
+  it('test factory: when given, createModel returns the factory model instead of the cloud model', () => {
+    delete process.env.MOONSHOT_API_KEY;
+    const templates = new TemplatesService();
+    const factory = new ModelGatewayService(templates, () => new DeterministicModel([{ type: 'text', text: 'factory' }]));
+    expect(factory.isTestMode()).toBe(true);
+    expect(factory.createModel('plan', {})).toBeInstanceOf(DeterministicModel);
+    // 没有 key 也不会在测试模式下报错：测试工厂绕过了云端模型。
+    expect(() => factory.createModel('plan', {})).not.toThrow();
   });
 
   it('deterministic model follows the scripted plan turn by turn', async () => {

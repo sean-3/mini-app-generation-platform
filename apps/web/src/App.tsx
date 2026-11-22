@@ -116,6 +116,7 @@ export default function App() {
   const [apps, setApps] = useState<AppSummary[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [intercept, setIntercept] = useState<{ title: string; body: string; alt?: string } | null>(null);
+  const [modelInfo, setModelInfo] = useState<{ provider: string; model: string; configured: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [repeatClicks, setRepeatClicks] = useState(0);
   const [repeatStopped, setRepeatStopped] = useState(false);
@@ -165,7 +166,7 @@ export default function App() {
   useEffect(() => {
     void api.templates().then(setTemplates).catch(() => setTemplates([]));
     void api.listApps().then(setApps).catch(() => setApps([]));
-    void api.health().catch(() => setNotice('后端未启动：请先在项目根目录跑 docker compose up，或 npm run dev:api'));
+    void api.health().then((h) => setModelInfo(h.model ?? null)).catch(() => setNotice('后端未启动：请先在项目根目录跑 docker compose up，或 npm run dev:api'));
     return () => {
       unsubRef.current?.();
       if (pollRef.current) window.clearInterval(pollRef.current);
@@ -326,6 +327,11 @@ export default function App() {
       <header className="topbar">
         <div className="mark">A</div>
         <div className="intro"><b>迷你应用生成台</b>一句话生成一个能用的小应用，应用是主角，过程在侧栏。</div>
+        {modelInfo && (
+          <span className="small" title={modelInfo.configured ? '模型已配好，生成会烧真 token' : '没配 MOONSHOT_API_KEY，生成按钮点了也会报错'}>
+            模型 {modelInfo.model} · {modelInfo.configured ? '已配 key' : '未配 key'}
+          </span>
+        )}
         <button className="tbtn" onClick={() => { void api.listApps().then(setApps); setView({ kind: 'apps' }); }}>我的应用</button>
         <button className="tbtn" onClick={() => run && setView({ kind: 'replay', runId: run.id })} disabled={!run}>回放与评分</button>
         <button className="tbtn primary" onClick={() => { setRun(null); setEvents([]); setApp(null); setInput(''); setNotice(null); setIntercept(null); }}>新建</button>
@@ -623,6 +629,12 @@ function ReplayView({ runId, onBack }: { runId: string; onBack: () => void }) {
                   <div className="cell"><b>{(data.eval.durationMs / 1000).toFixed(1)}s</b><span>耗时</span></div>
                   <div className="cell"><b>{data.eval.toolCalls}</b><span>工具调用</span></div>
                   <div className="cell"><b>{data.eval.errorCalls}</b><span>拦截 / 错误</span></div>
+                  {data.run.usage_json && (() => {
+                    try {
+                      const u = JSON.parse(data.run.usage_json);
+                      return <div className="cell"><b>{u.totalTokens}</b><span>模型 tokens（输入 {u.promptTokens} / 输出 {u.completionTokens}，主 Agent 计；子 Agent 不在内）</span></div>;
+                    } catch { return null; }
+                  })()}
                 </div>
               ) : (
                 <p className="muted">本轮还没有评估结果（发布完成后由评估生成）。</p>

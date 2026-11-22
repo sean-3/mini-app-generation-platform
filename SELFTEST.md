@@ -88,7 +88,7 @@ deepagents 1.17.0 `createMiddleware` + `wrapToolCall` 拦截：**通过 5/5**。
 
 ## 未完成项
 
-- 真实 LLM 接入（无 key，见 README“先说清楚”一节）。
+- 真实 LLM 循环本地验证（v4 已接 Kimi kimi-k3，但本机没 key；部署后在 Railway 上配好 `MOONSHOT_API_KEY` 再验，见 v4 一节）。
 - docker compose 实机验证（本机无运行时）。
 - 浏览器端点击级自测 + 360px 真机溢出验证（需主 agent 探针）。
 - Atoms 实测验证的 10 项（清单末尾“需实测项”）：审批步数与拒绝后果等仍以 Demo 设定为准，等 Xiao 的 Atoms 账号实测后再对。
@@ -104,3 +104,36 @@ deepagents 1.17.0 `createMiddleware` + `wrapToolCall` 拦截：**通过 5/5**。
 - 重启后：v3、线上 7 人、工作区 7 人、5 个应用都在。
 - 两处自测脚本误报已定位，均非产品 bug：PATCH /data 要包在 `{data: ...}` 里，直接传字段会 500；导出 JSON 返回 201 是 NestJS POST 默认。
 - 注意：回放 trace 的 actor 只有 Mike 和 ToolGateway，五人分工体现在 plan_json 和前端时间线里，trace 本身不逐人记 actor。
+
+## v4 自测（2026-11-23，端口 3101，DATA_DIR=/tmp/v4-selftest-data，无 MOONSHOT_API_KEY）
+
+构建：`nest build`（api）+ `tsc -b && vite build`（web）干净通过。单测 37/37（`npm test`，6 个 suite，约 32–45 秒）：32 个原有 + 5 个新增（网关中间件真循环拦截 2 个、云端模型 2 个、无 key 建 run 1 个；model-gateway 原 3 个里“云端插槽未配 key”一题改写为 MOONSHOT_API_KEY 报错）。
+
+真实 HTTP 驱动（无 key）：
+
+| # | 项目 | 方法 | 结果 |
+|---|---|---|---|
+| 1 | `/health` 模型信息 | GET /health | ✅ 200，`{"status":"ok","model":{"provider":"moonshot","model":"kimi-k3","configured":false}}` |
+| 2 | 首页静态 | GET / | ✅ 200（Vite index.html 由 NestJS 同源 serve） |
+| 3 | 无 key 建 run | POST /api/runs {"input":"小区团购接龙"} | ✅ 400，`{"message":"MOONSHOT_API_KEY 未设置：请设置环境变量 MOONSHOT_API_KEY（Moonshot 国内站 platform.moonshot.cn 的 key），否则无法创建 run。","error":"Bad Request","statusCode":400}`；runs 表 0 行（单测里也断言了） |
+| 4 | repeat-demo 不用 key | POST /api/runs/repeat-demo | ✅ 201 建 run；随后状态 stopped；回放 3 条 trace，第 1、2 次 `match_template` executed，第 3 次 `repeat_call` blocked（`Same tool call repeated 3 times (match_template); stopping to avoid ...`） |
+| 5 | 单测里的确定性 E2E | `npm test` agent.e2e.spec.ts | ✅ Build 简化流程两道审批 → published + eval 落库；Plan + Team 开三道审批 → published；Team 开轨迹无 nora/tina/oscar/david；Engineer 一人做完、批架构后直接 awaiting_publish；架构拒绝 / 计划拒绝回退；无匹配停下；无 key 时 createRun 抛 MOONSHOT_API_KEY 错误且不建 run |
+| 6 | 网关中间件真循环拦截 | `npm test` tool-gateway-middleware.spec.ts | ✅ 真 `createDeepAgent` + 确定性模型调 `export_file`：工具执行 0 次，模型收到的 ToolMessage 是 `{"isError":true,"step":"permission",...}`；对照组 `match_template` 放行、执行恰好 1 次 |
+
+## v4 自测中发现并修掉的问题
+
+1. **Nest 启动报 `UnknownDependenciesException`（真 bug，v4 自测发现）**：`ModelGatewayService` 的第二个构造参数是测试工厂（函数类型），生产装配不传；Nest 试图按 `Function` 类型注入，找不到 provider，服务起不来。修法：参数上加 `@Optional()`，容器里没有就注 `undefined`。修完重建、`curl /health` 200、自测全过。教训：可选的函数类型构造参数必须显式 `@Optional()`，不能只靠 TS 的 `?`。
+
+## v4 没验证的（写清楚，不编造）
+
+- **真模型循环本地没验证**：本机没有 `MOONSHOT_API_KEY`。`createCloudModel()` 返回 ChatOpenAI（kimi-k3、`https://api.moonshot.cn/v1`）只在单测里用假 key 断言过构造参数，没发过真实请求。部署后主 agent 在 Railway 上配好 `MOONSHOT_API_KEY` 再验：走一遍 Build 生成，看 token 用量、耗时、审批点是否正常，把结果补在这里。
+- docker compose 实机验证（本机无运行时；同 v3）。
+- 浏览器端点击级自测 + 360px 真机溢出验证（同 v3）。
+
+### 主 agent 独立复核（2026-11-23 01:46–01:47，端口 3103，DATA_DIR=/tmp/v4verify-data，无 MOONSHOT_API_KEY）
+
+- 干净构建：`npm run build`，api（nest build）+ web（tsc -b && vite build）都通过。
+- 单测 **37/37**（6 个 suite，约 21 秒）。
+- 代码抽查：`createCloudModel()` 用 ChatOpenAI，模型 `kimi-k3`（`MOONSHOT_MODEL` 可改），`baseURL https://api.moonshot.cn/v1`，key 只从 `process.env.MOONSHOT_API_KEY` 读；确定性模型只在测试和工厂里出现，生产装配不传。
+- 真实 HTTP：`/health` 200（`configured:false`，model kimi-k3）；首页 200；`POST /api/runs` 400（`MOONSHOT_API_KEY 未设置`，消息写清了国内站 key 不能混用国际站）；repeat-demo 建 run 后 stopped，回放 3 条 trace——前两次 `match_template` 正常，第三次 `is_error=1` 被 `repeat_call` 拦下。
+- 仍未验证（同上）：真模型循环——本地没 key，部署后在 Railway 上配好 key 再验。

@@ -39,6 +39,7 @@ export interface GatewayPolicy {
 export const DEFAULT_POLICY: GatewayPolicy = {
   allowedTools: new Set([
     'task',
+    'write_todos',
     'match_template',
     'read_template',
     'save_draft',

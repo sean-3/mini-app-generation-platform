@@ -83,6 +83,9 @@ export class DatabaseService implements OnModuleInit {
     addColumn('ALTER TABLE runs ADD COLUMN mode TEXT');
     addColumn('ALTER TABLE runs ADD COLUMN team_mode INTEGER DEFAULT 0');
     addColumn('ALTER TABLE runs ADD COLUMN plan_json TEXT');
+    // v4：runs.usage_json：主 Agent 各轮调用的 token 用量
+    // {promptTokens, completionTokens, totalTokens, modelCalls}；子 Agent 的用量不在内。
+    addColumn('ALTER TABLE runs ADD COLUMN usage_json TEXT');
     addColumn('ALTER TABLE apps ADD COLUMN published_json TEXT');
     addColumn('ALTER TABLE apps ADD COLUMN published_version INTEGER DEFAULT 0');
   }

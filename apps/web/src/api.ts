@@ -26,6 +26,8 @@ export interface RunRow {
   architecture_json: string | null;
   draft_json: string | null;
   app_id: string | null;
+  /** 主 Agent 各轮调用的 token 用量 JSON（单测里为 null；Team Mode 开时是下限）。 */
+  usage_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -93,7 +95,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  health: () => req<{ status: string }>('/health'),
+  health: () => req<{ status: string; model?: { provider: string; model: string; configured: boolean } }>('/health'),
   templates: () => req<Template[]>('/api/templates'),
   createRun: (input: string, opts?: { mode?: RunMode; teamMode?: boolean }) =>
     req<RunRow>('/api/runs', { method: 'POST', body: JSON.stringify({ input, mode: opts?.mode ?? 'build', teamMode: opts?.teamMode ?? false }) }),

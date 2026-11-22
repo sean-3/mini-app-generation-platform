@@ -1,6 +1,8 @@
 import { DatabaseService } from '../src/persistence/database.service';
 import { TemplatesService } from '../src/templates/templates.service';
 import { ModelGatewayService } from '../src/model-gateway/model-gateway.service';
+import { DeterministicModel } from '../src/model-gateway/deterministic-model';
+import { buildDeterministicScript } from '../src/model-gateway/deterministic-scripts';
 import { ToolGatewayService } from '../src/tool-gateway/tool-gateway.service';
 import { EvalService } from '../src/eval/eval.service';
 import { RunEventHub } from '../src/agent/run-hub';
@@ -27,13 +29,15 @@ describe('AgentService end-to-end (real DeepAgents loop)', () => {
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-e2e-'));
     process.env.DATA_DIR = dir;
+    // 单测不用真 key：确定性模型走测试工厂，跑同一套阶段代码。
+    delete process.env.MOONSHOT_API_KEY;
     db = new DatabaseService();
     db.onModuleInit();
     const templates = new TemplatesService();
     agent = new AgentService(
       db,
       templates,
-      new ModelGatewayService(templates),
+      new ModelGatewayService(templates, (phase, ctx) => new DeterministicModel(buildDeterministicScript(phase, ctx as any))),
       new ToolGatewayService(),
       new EvalService(db),
       new RunEventHub(),
@@ -175,6 +179,22 @@ describe('AgentService end-to-end (real DeepAgents loop)', () => {
     expect(v2.published_json).toBe(v2.data_json);
     expect(JSON.parse(v2.published_json).signups.length).toBe(7);
   }, 60_000);
+
+  it('no key: createRun throws a clear MOONSHOT_API_KEY error and never starts a run', () => {
+    delete process.env.MOONSHOT_API_KEY;
+    const templates = new TemplatesService();
+    // 生产装配：不传测试工厂，没有 key 就不能建 run，绝不用假模型冒充。
+    const prodAgent = new AgentService(
+      db,
+      templates,
+      new ModelGatewayService(templates),
+      new ToolGatewayService(),
+      new EvalService(db),
+      new RunEventHub(),
+    );
+    expect(() => prodAgent.createRun('小区团购接龙')).toThrow(/MOONSHOT_API_KEY/);
+    expect(db.query('SELECT * FROM runs')).toHaveLength(0);
+  });
 
   it('repeat demo: gateway blocks the 3rd identical call and stops the run', async () => {
     const run = agent.repeatDemo('团购接龙');
