@@ -10,6 +10,7 @@ import { ToolGatewayService, createToolGatewayMiddleware, type GatewayTrace } fr
 import { buildTools } from './tools';
 import { EvalService } from '../eval/eval.service';
 import { RunEventHub } from './run-hub';
+import { parseJsonLoose } from '../common/json';
 
 export type RunMode = 'build' | 'plan' | 'engineer';
 
@@ -38,8 +39,19 @@ export interface RunRow {
   draft_json: string | null;
   app_id: string | null;
   usage_json: string | null;
+  /** @ 指定的人名（Mike/Iris/Emma/Bob/Alex 之一），仅作提示，不改路由；没 @ 就是 null。 */
+  mentioned_agent: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** 可被 @ 的 5 个人（和前端 AGENTS 列表一致）。 */
+export const MENTIONABLE_AGENTS = ['Mike', 'Iris', 'Emma', 'Bob', 'Alex'] as const;
+
+/** @ 提示进 system prompt 的一句：只作提示，路由仍按所选模式走。 */
+function mentionLine(mentionedAgent: string | null): string {
+  if (!mentionedAgent) return '';
+  return `\nNote: the user mentioned @${mentionedAgent} for this run. Treat it as a hint only — routing still follows the selected mode (Build/Plan/Engineer + Team Mode).`;
 }
 
 // deepagents 1.17.0：传给 createDeepAgent 的 subagents 必须是原始 spec 对象，
@@ -128,10 +140,12 @@ export class AgentService {
 
   // ---------------- run CRUD ----------------
 
-  createRun(input: string, opts: { mode?: RunMode; teamMode?: boolean } = {}): RunRow {
+  createRun(input: string, opts: { mode?: RunMode; teamMode?: boolean; mentionedAgent?: string } = {}): RunRow {
     const mode: RunMode = opts.mode === 'plan' || opts.mode === 'engineer' ? opts.mode : 'build';
     // Engineer 模式只派 Alex，Team Mode 对它无效。
     const teamMode = mode === 'engineer' ? false : opts.teamMode === true;
+    // @ 只认 5 个人名，其他值一律忽略（不存、不提示）。
+    const mentionedAgent = (MENTIONABLE_AGENTS as readonly string[]).includes(opts.mentionedAgent ?? '') ? opts.mentionedAgent! : null;
     // 没有 key 不创建 run、不跑流程：直接报明确错误，绝不用假模型冒充。
     if (!this.modelGateway.isTestMode() && !this.modelGateway.hasCloudModel()) {
       throw new BadRequestException(
@@ -141,12 +155,13 @@ export class AgentService {
     const id = randomUUID();
     const now = new Date().toISOString();
     this.db.run(
-      'INSERT INTO runs (id, input, status, mode, team_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO runs (id, input, status, mode, team_mode, mentioned_agent, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       id,
       input,
       'running',
       mode,
       teamMode ? 1 : 0,
+      mentionedAgent,
       now,
       now,
     );
@@ -317,6 +332,7 @@ export class AgentService {
         '"approvals": ["计划","架构","发布"], "notes": ["<short note>", ...]}\n' +
         'If match_template returns templateId null, the request is outside the four templates: ' +
         'reply with ONLY {"templateId": null, "reason": "<why it does not fit>"} and stop.' +
+        mentionLine(this.getRun(runId).mentioned_agent) +
         toolRules(['match_template', 'read_template']),
     });
 
@@ -392,6 +408,7 @@ export class AgentService {
         '1) Use task to ask subagent iris_emma: research the request and write the requirements list (it calls match_template itself).\n' +
         '2) Use task to ask subagent bob: make the architecture decision including design notes (it calls read_template itself).\n' +
         '3) When both results are back, reply with ONLY the text: stage A done' +
+        mentionLine(this.getRun(runId).mentioned_agent) +
         toolRules(ALL_CUSTOM_TOOLS),
     });
 
@@ -432,6 +449,7 @@ export class AgentService {
         '"architecture": {"templateId": "<id>", "storage": "apps 表，data_json 字段；草稿先写 drafts 表，审批通过后转正", ' +
         '"tools": ["match_template","save_draft","validate_schema"], "approvals": ["architecture","publish"], ' +
         '"design": {"layout": "<where the app sits, where the timeline sits>", "notes": ["<design note>", ...]}}}' +
+        mentionLine(this.getRun(runId).mentioned_agent) +
         toolRules(['match_template', 'read_template']),
     });
 
@@ -485,6 +503,7 @@ export class AgentService {
         'You are Mike, the team coordinator. Delegate everything to Alex, then summarize.\n' +
         'Use task to ask subagent alex to match the template, generate the draft and self-check it, ' +
         'then reply with ONLY the text: engineer mode done' +
+        mentionLine(this.getRun(runId).mentioned_agent) +
         toolRules(ALL_CUSTOM_TOOLS),
     });
 
@@ -786,24 +805,5 @@ export class AgentService {
       }
     }
     return out;
-  }
-}
-
-/** 宽松解析一段文本里的 JSON：去 ``` 围栏 → 直接解析 → 取首尾大括号子串。 */
-export function parseJsonLoose(text: string): any | null {
-  const t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  try {
-    return JSON.parse(t);
-  } catch {
-    const start = t.indexOf('{');
-    const end = t.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(t.slice(start, end + 1));
-      } catch {
-        return null;
-      }
-    }
-    return null;
   }
 }

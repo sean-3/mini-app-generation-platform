@@ -164,7 +164,13 @@ describe('AgentService end-to-end (real DeepAgents loop)', () => {
   }, 60_000);
 
   it('publish/update: edit after publish does not touch the live snapshot until Update', async () => {
-    const apps = new AppsService(db, new TemplatesService(), new ToolGatewayService());
+    const templates = new TemplatesService();
+    const apps = new AppsService(
+      db,
+      templates,
+      new ToolGatewayService(),
+      new ModelGatewayService(templates, (phase, ctx) => new DeterministicModel(buildDeterministicScript(phase, ctx as any))),
+    );
     const run = agent.createRun('小区团购接龙');
     await waitFor(() => agent.getRun(run.id).status === 'awaiting_architecture');
     agent.approveArchitecture(run.id, true);
@@ -191,6 +197,38 @@ describe('AgentService end-to-end (real DeepAgents loop)', () => {
     expect(JSON.parse(v2.published_json).signups.length).toBe(7);
   }, 60_000);
 
+  it('dialogue edit after publish: workspace changes, live snapshot unchanged until Update', async () => {
+    const templates = new TemplatesService();
+    const apps = new AppsService(
+      db,
+      templates,
+      new ToolGatewayService(),
+      new ModelGatewayService(templates, (phase, ctx) => new DeterministicModel(buildDeterministicScript(phase, ctx as any))),
+    );
+    const run = agent.createRun('小区团购接龙');
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_architecture');
+    agent.approveArchitecture(run.id, true);
+    await waitFor(() => agent.getRun(run.id).status === 'awaiting_publish');
+    agent.approvePublish(run.id, true);
+    await waitFor(() => agent.getRun(run.id).status === 'published');
+    const appId = agent.getRun(run.id).app_id!;
+    const v1 = apps.get(appId);
+    expect(JSON.parse(v1.data_json).signups.length).toBe(6);
+    expect(v1.published_version).toBe(1);
+
+    // 对话改数据：工作区 6→7 条，线上快照仍是 6 条、版本仍是 v1。
+    const { app: edited, changes } = await apps.editData(appId, '加一条报名');
+    expect(JSON.parse(edited.data_json).signups.length).toBe(7);
+    expect(JSON.parse(edited.published_json!).signups.length).toBe(6);
+    expect(edited.published_version).toBe(1);
+    expect(changes[0].summary).toBe('signups：6 条 → 7 条');
+
+    // Update 后线上版才跟上。
+    const v2 = apps.publishUpdate(appId);
+    expect(v2.published_version).toBe(2);
+    expect(JSON.parse(v2.published_json!).signups.length).toBe(7);
+  }, 60_000);
+
   it('no key: createRun throws a clear MOONSHOT_API_KEY error and never starts a run', () => {
     delete process.env.MOONSHOT_API_KEY;
     const templates = new TemplatesService();
@@ -205,6 +243,23 @@ describe('AgentService end-to-end (real DeepAgents loop)', () => {
     );
     expect(() => prodAgent.createRun('小区团购接龙')).toThrow(/MOONSHOT_API_KEY/);
     expect(db.query('SELECT * FROM runs')).toHaveLength(0);
+  });
+
+  it('@ mention: mentioned agent is recorded on the run; unknown names are ignored', async () => {
+    const r = agent.createRun('小区团购接龙', { mentionedAgent: 'Bob' });
+    expect(r.mentioned_agent).toBe('Bob');
+    // run 正常走到架构审批：@ 只作提示，不改流程。
+    await waitFor(() => agent.getRun(r.id).status === 'awaiting_architecture');
+    expect(agent.getRun(r.id).mentioned_agent).toBe('Bob');
+
+    // 每个 createRun 都会启动后台 pipeline：必须等它们走到审批门才结束单测，
+    // 否则 afterEach 删掉临时目录后后台写库会报错。
+    const r2 = agent.createRun('小区团购接龙', { mentionedAgent: '不是一个人' });
+    await waitFor(() => agent.getRun(r2.id).status === 'awaiting_architecture');
+    expect(agent.getRun(r2.id).mentioned_agent).toBeNull();
+    const r3 = agent.createRun('小区团购接龙');
+    await waitFor(() => agent.getRun(r3.id).status === 'awaiting_architecture');
+    expect(agent.getRun(r3.id).mentioned_agent).toBeNull();
   });
 
   it('repeat demo: gateway blocks the 3rd identical call and stops the run', async () => {

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, subscribeRunStream, type AppRow, type AppSummary, type EvalResult, type RunMode, type RunRow, type Template, type TraceRow } from './api';
 import { AppPreview } from './preview';
+import { isEditIntent } from './edit-intent';
+import { diffSummary } from './diff';
+import { findMentionQuery } from './mention';
 
 type Tab = 'preview' | 'overview' | 'code' | 'replay';
 type ReplayData = { run: RunRow; traces: TraceRow[]; eval: EvalResult | null };
@@ -12,6 +15,9 @@ const AGENTS = [
   { key: 'bob', label: 'Bob', role: '架构', cls: 'av-bob' },
   { key: 'alex', label: 'Alex', role: '工程师', cls: 'av-alex' },
 ];
+
+/** 审批卡上的模式标注：Build / Plan / Engineer。 */
+const MODE_LABEL: Record<RunMode, string> = { build: 'Build 模式', plan: 'Plan 模式', engineer: 'Engineer 模式' };
 
 const TEMPLATE_PROMPTS: Record<string, string> = {
   ledger: '我要一个记账看板',
@@ -124,6 +130,20 @@ function fmtDate(iso: string): string {
   }
 }
 
+/** “本次改动”摘要：只在有未发布改动时显示；无改动（或未发布过）时什么都不渲染。 */
+function DiffBlock({ publishedJson, currentJson }: { publishedJson: string | null; currentJson: string | null }) {
+  const changes = diffSummary(publishedJson, currentJson);
+  if (changes.length === 0) return null;
+  return (
+    <div style={{ margin: '0 0 10px', fontSize: 13 }}>
+      <b>本次改动</b>
+      <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+        {changes.map((c) => <li key={c.key}>{c.summary}</li>)}
+      </ul>
+    </div>
+  );
+}
+
 export default function App() {
   const [view, setView] = useState<'home' | 'project'>('home');
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -165,7 +185,25 @@ export default function App() {
   const [replay, setReplay] = useState<ReplayData | null>(null);
   const [replaySel, setReplaySel] = useState<ReplayData | null>(null);
   const [rename, setRename] = useState('');
+  /** 发布面板里的版本列表（每次 Publish/Update 的快照）。 */
+  const [versions, setVersions] = useState<Array<{ version: number; created_at: string }>>([]);
+  useEffect(() => {
+    if (!publishOpen || !app) return;
+    let alive = true;
+    api.listVersions(app.id).then((v) => { if (alive) setVersions(v); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [publishOpen, app?.id]);
   const [chatInput, setChatInput] = useState('');
+  /** @ 指定 Agent：Team Mode 开时才弹名单；被 @ 的人只记进 run + 当提示，不改路由。 */
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentioned, setMentioned] = useState<string | null>(null);
+  const chatRef = useRef<HTMLTextAreaElement | null>(null);
+  /** 代码 tab 的 JSON 编辑态：null = 只读展示；字符串 = 正在编辑的文本。 */
+  const [codeText, setCodeText] = useState<string | null>(null);
+  const [codeError, setCodeError] = useState<string | null>(null);
+  /** 对话改数据的记录（无 run，只有输入 + 改了哪几项），只在当前项目页显示。 */
+  const [editMsgs, setEditMsgs] = useState<Array<{ input: string; changes: string[]; at: string }>>([]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -235,14 +273,18 @@ export default function App() {
     setNotice(null);
     setIntercept(null);
     setApp(null);
+    setEditMsgs([]);
     setReplay(null);
     setReplaySel(null);
     setTab('preview');
     setChatCollapsed(false);
     try {
-      const r = await api.createRun(t, { mode, teamMode: mode === 'engineer' ? false : teamMode });
+      const r = await api.createRun(t, { mode, teamMode: mode === 'engineer' ? false : teamMode, mentionedAgent: mentioned ?? undefined });
       setRun(r);
       setView('project');
+      setChatInput('');
+      setMentioned(null);
+      setMentionOpen(false);
       attachStream(r.id);
       void refreshReplay(r.id);
       if (r.status === 'stopped') {
@@ -253,6 +295,61 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  };
+
+  /**
+   * 项目页聊天框发送：已有应用且输入是“改当前应用”时，走对话改数据（只改工作区，
+   * 不发布）；否则开新 run。意图用规则短路判（见 edit-intent.ts），拿不准的一律开新 run。
+   */
+  const sendChat = async () => {
+    const t = chatInput.trim();
+    if (!t || busy) return;
+    if (app && isEditIntent(t, app.template_id, templates)) {
+      setBusy(true);
+      try {
+        const { app: updated, changes } = await api.editApp(app.id, t);
+        setApp(updated);
+        setChatInput('');
+        setEditMsgs((m) => [...m, { input: t, changes: changes.map((c) => c.summary), at: new Date().toISOString() }]);
+        setNotice(
+          changes.length > 0
+            ? `已按你的要求改了工作区数据：${changes.map((c) => c.summary).join('；')}。点 Update 发布生效。`
+            : '按你的要求看了一遍，数据没有变化。',
+        );
+      } catch (e: any) {
+        setNotice(`改数据失败：${e?.message ?? e}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    void startRun(chatInput);
+  };
+
+  /**
+   * 项目页聊天框输入：Team Mode 开时（Engineer 模式除外），输入 @ 弹出 5 人名单。
+   * Team Mode 关时不弹。被 @ 的名字删掉后，记录也清掉。
+   */
+  const onChatChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const v = e.target.value;
+    setChatInput(v);
+    if (mentioned && !v.includes(`@${mentioned}`)) setMentioned(null);
+    const q = teamMode && mode !== 'engineer' ? findMentionQuery(v, e.target.selectionStart ?? v.length) : null;
+    setMentionOpen(q !== null);
+    setMentionQuery(q ?? '');
+  };
+
+  /** 点选名单里的人：把 @名字 插进输入框，并记下来（发 run 时带上）。 */
+  const pickMention = (name: string) => {
+    const el = chatRef.current;
+    const v = chatInput;
+    const pos = el?.selectionStart ?? v.length;
+    const at = v.slice(0, pos).lastIndexOf('@');
+    const next = (at >= 0 ? v.slice(0, at) : v.slice(0, pos)) + `@${name} ` + v.slice(pos);
+    setChatInput(next);
+    setMentioned(name);
+    setMentionOpen(false);
+    el?.focus();
   };
 
   const approve = async (kind: 'plan' | 'architecture' | 'publish', approved: boolean) => {
@@ -271,6 +368,30 @@ export default function App() {
       if (!approved) setNotice(kind === 'plan' ? '计划被拒绝，已回退，可换个说法重新生成。' : kind === 'architecture' ? '架构被拒绝，已回退到需求阶段，可改一句话重新生成。' : '发布被拒绝，草稿已保留，可修改后重新发布。');
     } catch (e: any) {
       setNotice(`审批失败：${e?.message ?? e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 代码 tab 保存 JSON：先本地解析，再调 PATCH（服务端 parseData 归一化校验）；失败不保存。 */
+  const saveCode = async () => {
+    if (!app || codeText === null) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(codeText);
+    } catch {
+      setCodeError('JSON 格式不对：请检查括号、逗号，没保存。');
+      return;
+    }
+    setBusy(true);
+    try {
+      const updated = await api.updateAppData(app.id, parsed);
+      setApp(updated);
+      setCodeText(null);
+      setCodeError(null);
+      setNotice('已保存到工作区，点 Update 发布生效。');
+    } catch (e: any) {
+      setCodeError(`保存失败：${e?.message ?? e}`);
     } finally {
       setBusy(false);
     }
@@ -356,6 +477,9 @@ export default function App() {
     try {
       const a = await api.getApp(appId);
       setApp(a);
+      setCodeText(null);
+      setCodeError(null);
+      setEditMsgs([]);
       setReplay(null);
       setReplaySel(null);
       setTab('preview');
@@ -394,6 +518,37 @@ export default function App() {
       showToast('已改名');
     } catch (e: any) {
       setNotice(`改名失败：${e?.message ?? e}`);
+    }
+  };
+
+  /** Restore：把某版本快照拷回工作区（未发布改动），再点 Update 才发布。 */
+  const doRestore = async (version: number) => {
+    if (!app) return;
+    setBusy(true);
+    try {
+      const updated = await api.restoreApp(app.id, version);
+      setApp(updated);
+      setNotice(`已恢复到工作区，请点 Update 发布。`);
+    } catch (e: any) {
+      setNotice(`恢复失败：${e?.message ?? e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Remix / 克隆：复制当前应用成独立新项目，跳到新项目页。 */
+  const doClone = async () => {
+    if (!app) return;
+    setBusy(true);
+    try {
+      const copy = await api.cloneApp(app.id);
+      setApps(await api.listApps());
+      setNotice(`已复制为「${copy.name}」，未发布。`);
+      await openProject(copy.id);
+    } catch (e: any) {
+      setNotice(`克隆失败：${e?.message ?? e}`);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -649,6 +804,9 @@ export default function App() {
             {run && (
               <div className="msg-user">{run.input}</div>
             )}
+            {run && run.mentioned_agent && (
+              <div className="msg-time">@{run.mentioned_agent} 参与本轮（仅提示，路由仍按所选模式走）</div>
+            )}
             {run && <div className="msg-time">{fmtTime(run.created_at)}</div>}
 
             {run && (
@@ -685,15 +843,16 @@ export default function App() {
                     <div className="ver-card">
                       <b>版本 {app.published_version} · 完成{app.name}</b>
                       <div className="row">
-                        <button className="btn" onClick={() => showToast('克隆未接')}>克隆</button>
+                        <button className="btn" disabled={busy} onClick={() => void doClone()}>克隆</button>
                         <button className="btn" onClick={() => void copyText(window.location.origin, '链接已复制')}>复制链接</button>
                       </div>
                     </div>
                   )}
                   {run.status === 'awaiting_plan' && (
                     <div className="approve">
-                      <h3>审批 0 · 计划确认</h3>
+                      <h3>审批 0 · 计划确认 · Plan 模式</h3>
                       <p>Mike 已出计划。确认后才开工；拒绝则回退。</p>
+                      <p className="small">Demo 设定：每轮生成都需人工确认。</p>
                       <div className="row">
                         <button className="btn primary" disabled={busy} onClick={() => void approve('plan', true)}>确认计划，开工</button>
                         <button className="btn danger" disabled={busy} onClick={() => void approve('plan', false)}>拒绝，回退</button>
@@ -702,8 +861,10 @@ export default function App() {
                   )}
                   {run.status === 'awaiting_architecture' && (
                     <div className="approve">
-                      <h3>审批 1 · 架构确认</h3>
+                      <h3>审批 1 · 架构确认 · {MODE_LABEL[run.mode]}</h3>
                       <p>Bob 已出架构决策。确认后 Alex 才开始生成；拒绝则回退到需求阶段。</p>
+                      <p className="small">Demo 设定：每轮生成都需人工确认。</p>
+                      <DiffBlock publishedJson={app?.published_json ?? null} currentJson={app?.data_json ?? null} />
                       <div className="row">
                         <button className="btn primary" disabled={busy} onClick={() => void approve('architecture', true)}>确认架构，继续生成</button>
                         <button className="btn danger" disabled={busy} onClick={() => void approve('architecture', false)}>拒绝，回退</button>
@@ -712,8 +873,10 @@ export default function App() {
                   )}
                   {run.status === 'awaiting_publish' && (
                     <div className="approve">
-                      <h3>审批 2 · 发布确认</h3>
+                      <h3>审批 2 · 发布确认 · {MODE_LABEL[run.mode]}</h3>
                       <p>Alex 已生成草稿（见右侧预览）。确认后才上线；拒绝则保留草稿。</p>
+                      <p className="small">Demo 设定：每轮生成都需人工确认。</p>
+                      <DiffBlock publishedJson={app?.published_json ?? null} currentJson={app?.data_json ?? null} />
                       <div className="row">
                         <button className="btn primary" disabled={busy} onClick={() => void approve('publish', true)}>确认发布</button>
                         <button className="btn danger" disabled={busy} onClick={() => void approve('publish', false)}>拒绝，保留草稿</button>
@@ -732,6 +895,19 @@ export default function App() {
                 </div>
               </div>
             )}
+            {editMsgs.map((m, i) => (
+              <div key={i}>
+                <div className="msg-user">{m.input}</div>
+                <div className="msg-time">{fmtTime(m.at)}</div>
+                <div className="msg-agent">
+                  <span className="avatar sm av-mike">M</span>
+                  <div className="msg-body">
+                    <div className="who">Mike <span>· 协调</span></div>
+                    <p>已改了工作区数据{m.changes.length > 0 ? `：${m.changes.join('；')}` : '，但数据没有变化'}。点 Update 发布生效。</p>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
 
           <div className="chat-foot">
@@ -743,12 +919,28 @@ export default function App() {
               {modelInfo && <span className="pill-blue">{modelInfo.model}{modelInfo.configured ? '' : ' · 未配 key'}</span>}
             </div>
             <div className="chat-input">
-              <textarea
-                placeholder="让智能体团队实现你的想法"
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void startRun(chatInput); }}
-              />
+              <div style={{ position: 'relative' }}>
+                <textarea
+                  ref={chatRef}
+                  placeholder="让智能体团队实现你的想法"
+                  value={chatInput}
+                  onChange={onChatChange}
+                  onKeyDown={(e) => { if (e.key === 'Escape') setMentionOpen(false); if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void sendChat(); }}
+                />
+                {mentionOpen && teamMode && mode !== 'engineer' && (
+                  <div className="menu" style={{ bottom: '100%', left: 0, marginBottom: 6, minWidth: 220 }}>
+                    {AGENTS.filter((a) => a.label.toLowerCase().includes(mentionQuery.toLowerCase()) || a.role.includes(mentionQuery)).map((a) => (
+                      <button key={a.label} className="menu-row" onClick={() => pickMention(a.label)}>
+                        <span className={`avatar sm av-${a.label.toLowerCase()}`}>{a.label[0]}</span>
+                        <span className="grow">{a.label} <span className="muted">· {a.role}</span></span>
+                      </button>
+                    ))}
+                    {AGENTS.filter((a) => a.label.toLowerCase().includes(mentionQuery.toLowerCase()) || a.role.includes(mentionQuery)).length === 0 && (
+                      <div className="menu-row muted">没有匹配的人</div>
+                    )}
+                  </div>
+                )}
+              </div>
               <div className="composer-foot">
                 <div style={{ position: 'relative' }}>
                   <button className="icon-btn" title="附件" onClick={() => setAttachOpen((v) => !v)}>＋</button>
@@ -760,11 +952,12 @@ export default function App() {
                   )}
                 </div>
                 <span className="spacer" />
+                <button className="menu-btn" title="回首页开一个新对话" onClick={() => setView('home')}>新对话</button>
                 <button className="icon-btn" title="语音输入（未接）" onClick={() => showToast('语音输入未接')}>♪</button>
-                <button className="send-btn" disabled={busy || !chatInput.trim()} title="开始新一轮生成" onClick={() => void startRun(chatInput)}>↑</button>
+                <button className="send-btn" disabled={busy || !chatInput.trim()} title={app ? '改当前应用，或开新一轮生成' : '开始新一轮生成'} onClick={() => void sendChat()}>↑</button>
               </div>
             </div>
-            <p className="chat-note">新输入会开始新一轮生成，不会修改当前应用（对话改应用的功能没有）。</p>
+            <p className="chat-note">{app ? '输入改数据的要求（如“加一条报名”）会直接改当前应用，点 Update 发布生效；要新做一个，点「新对话」或回首页输入。' : '新输入会开始新一轮生成。'}</p>
           </div>
         </section>
       )}
@@ -801,7 +994,7 @@ export default function App() {
           <button className="icon-btn" title={chatCollapsed ? '展开聊天栏' : '收起聊天栏'} onClick={() => setChatCollapsed((v) => !v)}>{chatCollapsed ? '»' : '«'}</button>
           <div className="seg-ctl">
             {([['preview', '预览'], ['overview', '概览'], ['code', '代码'], ['replay', '回放']] as Array<[Tab, string]>).map(([k, label]) => (
-              <button key={k} className={tab === k ? 'on' : ''} onClick={() => { setTab(k); if (k === 'replay') void api.listRuns().then(setRunsList).catch(() => undefined); }}>{label}</button>
+              <button key={k} className={tab === k ? 'on' : ''} onClick={() => { if (tab === 'code' && k !== 'code') { setCodeText(null); setCodeError(null); } setTab(k); if (k === 'replay') void api.listRuns().then(setRunsList).catch(() => undefined); }}>{label}</button>
             ))}
           </div>
           <button className="icon-btn" title={mobilePreview ? '显示桌面预览' : '显示移动预览'} onClick={() => setMobilePreview((v) => !v)}>{mobilePreview ? '▣' : '▯'}</button>
@@ -899,14 +1092,26 @@ export default function App() {
           {tab === 'code' && (
             <div className="ov-card">
               <h3>应用数据 JSON</h3>
-              <p className="muted" style={{ margin: '0 0 8px' }}>没有代码文件：我们的应用是模板数据 JSON，不是整站代码。下方是当前应用的完整数据（只读），以及本次 run 的工具调用 trace。</p>
+              <p className="muted" style={{ margin: '0 0 8px' }}>没有代码文件：我们的应用是模板数据 JSON，不是整站代码。{app ? '下方是当前应用的完整数据，点“编辑 JSON”可改，保存后只改工作区，点 Update 才发布。' : '下方是当前应用的完整数据（只读），以及本次 run 的工具调用 trace。'}</p>
               {shownApp ? (
                 <>
                   <div className="row" style={{ marginBottom: 6 }}>
+                    {app && codeText === null && <button className="btn" onClick={() => { setCodeText(pretty(shownApp.data_json)); setCodeError(null); }}>编辑 JSON</button>}
+                    {app && codeText !== null && (
+                      <>
+                        <button className="btn primary" disabled={busy} onClick={() => void saveCode()}>保存</button>
+                        <button className="btn" onClick={() => { setCodeText(null); setCodeError(null); }}>取消</button>
+                      </>
+                    )}
                     <button className="btn" onClick={() => void copyText(pretty(shownApp.data_json), 'JSON 已复制')}>复制 JSON</button>
                     <span className="small">模板：{templateName(shownApp.template_id)}</span>
                   </div>
-                  <pre className="json">{pretty(shownApp.data_json)}</pre>
+                  {codeError && <p style={{ color: '#DC2626', fontSize: 13, margin: '0 0 8px' }}>{codeError}</p>}
+                  {codeText !== null ? (
+                    <textarea className="input" style={{ width: '100%', minHeight: 320, fontFamily: 'ui-monospace, monospace', fontSize: 13, lineHeight: 1.5 }} value={codeText} onChange={(e) => setCodeText(e.target.value)} />
+                  ) : (
+                    <pre className="json">{pretty(shownApp.data_json)}</pre>
+                  )}
                 </>
               ) : (
                 <p className="muted">还没有应用数据。</p>
@@ -999,6 +1204,20 @@ export default function App() {
             </div>
             <p className="small">本 Demo 不设私密应用，链接一直是公开的，开关只做显示。</p>
             <div className="kv-row"><b>当前状态</b><span>{app ? (app.published_version > 0 ? `已发布 v${app.published_version}${dirty ? '，有未发布改动' : ''}` : 'Preview · 未上线') : run ? run.status : '还没有应用'}</span></div>
+            {app && <DiffBlock publishedJson={app.published_json} currentJson={app.data_json} />}
+            {app && versions.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <b style={{ fontSize: 13 }}>历史版本</b>
+                <ul style={{ margin: '6px 0 0', padding: 0, listStyle: 'none' }}>
+                  {versions.map((v) => (
+                    <li key={v.version} className="kv-row">
+                      <span>v{v.version} · {fmtTime(v.created_at)}{app.published_version === v.version ? '（线上版）' : ''}</span>
+                      <button className="btn" disabled={busy} onClick={() => void doRestore(v.version)}>恢复到此版本</button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <button className="btn primary block" style={{ marginTop: 18, width: '100%', padding: '12px 0', fontSize: 15 }} disabled={pub.disabled} onClick={pub.onClick}>{pub.label}</button>
           </div>
         )}

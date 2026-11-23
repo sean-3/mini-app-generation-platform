@@ -12,9 +12,9 @@ export class AgentController {
   ) {}
 
   @Post()
-  create(@Body() body: { input: string; mode?: string; teamMode?: boolean }) {
+  create(@Body() body: { input: string; mode?: string; teamMode?: boolean; mentionedAgent?: string }) {
     const mode = body.mode === 'plan' || body.mode === 'engineer' ? body.mode : 'build';
-    return this.agent.createRun(body.input ?? '', { mode, teamMode: body.teamMode === true });
+    return this.agent.createRun(body.input ?? '', { mode, teamMode: body.teamMode === true, mentionedAgent: body.mentionedAgent });
   }
 
   @Post('repeat-demo')

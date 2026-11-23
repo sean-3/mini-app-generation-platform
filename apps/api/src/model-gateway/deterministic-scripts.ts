@@ -19,6 +19,8 @@ export interface DeterministicContext {
   appName?: string;
   appId?: string;
   runId?: string;
+  /** 对话改数据（edit 阶段）用的当前应用数据。 */
+  currentData?: unknown;
   templates: TemplatesService;
 }
 
@@ -243,7 +245,50 @@ export function buildDeterministicScript(phase: string, ctx: DeterministicContex
         { type: 'text', text: 'review done' },
       ];
 
+    case 'edit': {
+      // 对话改数据（只改数据版）的确定性剧本：不调工具，一次文本返回改完的完整数据。
+      // 按输入里的关键词做固定改动（单测用）；生产走真模型。
+      return [
+        {
+          type: 'text',
+          text: () => JSON.stringify(applyDeterministicEdit(templateId, ctx.currentData, input)),
+        },
+      ];
+    }
+
     default:
       throw new Error(`unknown deterministic phase: ${phase}`);
   }
+}
+
+/**
+ * 确定性改动规则（单测用）：输入含“加”就往主数组尾部加一条；含“删”就去掉最后一条；
+ * 其他输入原样返回（等于没改动）。只覆盖单测要断言的路径，不模拟真模型。
+ */
+function applyDeterministicEdit(templateId: string, currentData: unknown, input: string): unknown {
+  const data = JSON.parse(JSON.stringify(currentData ?? {}));
+  const has = (s: string) => input.includes(s);
+  if (has('删')) {
+    const key = mainArrayKey(templateId);
+    if (key && Array.isArray(data[key]) && data[key].length > 0) data[key].pop();
+    return data;
+  }
+  if (!has('加')) return data;
+  const key = mainArrayKey(templateId);
+  if (!key || !Array.isArray(data[key])) return data;
+  if (templateId === 'signup') {
+    data[key].push({ id: 's-edit', name: '新报名', count: 1, note: '', building: '', slot: '上午 09:00-11:00', phone: '', items: '' });
+  } else if (templateId === 'ledger') {
+    const m = input.match(/(\d+(?:\.\d+)?)/);
+    data[key].push({ id: 'r-edit', amount: m ? Number(m[1]) : 100, category: '其他', date: new Date().toISOString().slice(0, 10), note: '' });
+  } else if (templateId === 'habit') {
+    data[key].push({ id: 'h-edit', name: '新习惯', streak: 0, week: [false, false, false, false, false, false, false] });
+  } else if (templateId === 'quote') {
+    data[key].push({ id: 'q-edit', item: '新增项目', qty: 1, price: 100 });
+  }
+  return data;
+}
+
+function mainArrayKey(templateId: string): string | null {
+  return templateId === 'signup' ? 'signups' : templateId === 'ledger' ? 'records' : templateId === 'habit' ? 'habits' : templateId === 'quote' ? 'rows' : null;
 }

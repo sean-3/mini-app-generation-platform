@@ -28,6 +28,8 @@ export interface RunRow {
   app_id: string | null;
   /** 主 Agent 各轮调用的 token 用量 JSON（单测里为 null；Team Mode 开时是下限）。 */
   usage_json: string | null;
+  /** @ 指定的人名，仅作提示，不改路由；没 @ 就是 null。 */
+  mentioned_agent: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -97,8 +99,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => req<{ status: string; model?: { provider: string; model: string; configured: boolean } }>('/health'),
   templates: () => req<Template[]>('/api/templates'),
-  createRun: (input: string, opts?: { mode?: RunMode; teamMode?: boolean }) =>
-    req<RunRow>('/api/runs', { method: 'POST', body: JSON.stringify({ input, mode: opts?.mode ?? 'build', teamMode: opts?.teamMode ?? false }) }),
+  createRun: (input: string, opts?: { mode?: RunMode; teamMode?: boolean; mentionedAgent?: string }) =>
+    req<RunRow>('/api/runs', { method: 'POST', body: JSON.stringify({ input, mode: opts?.mode ?? 'build', teamMode: opts?.teamMode ?? false, mentionedAgent: opts?.mentionedAgent ?? null }) }),
   repeatDemo: (input: string) => req<RunRow>('/api/runs/repeat-demo', { method: 'POST', body: JSON.stringify({ input }) }),
   listRuns: () => req<RunRow[]>('/api/runs'),
   getRun: (id: string) => req<RunRow>(`/api/runs/${id}`),
@@ -115,7 +117,19 @@ export const api = {
     req<AppRow>('/api/apps', { method: 'POST', body: JSON.stringify({ templateId, name }) }),
   updateAppData: (id: string, data: unknown) =>
     req<AppRow>(`/api/apps/${id}/data`, { method: 'PATCH', body: JSON.stringify({ data }) }),
+  /** 对话改数据：只改工作区数据，不发布；返回改了哪几项。 */
+  editApp: (id: string, input: string) =>
+    req<{ app: AppRow; changes: Array<{ key: string; kind: string; summary: string }> }>(
+      `/api/apps/${id}/edit`,
+      { method: 'POST', body: JSON.stringify({ input }) },
+    ),
   updateApp: (id: string) => req<AppRow>(`/api/apps/${id}/update`, { method: 'POST' }),
+  /** 版本列表：每次 Publish/Update 的快照。 */
+  listVersions: (id: string) => req<Array<{ version: number; created_at: string }>>(`/api/apps/${id}/versions`),
+  /** Restore：把某版本快照拷回工作区（未发布改动）。 */
+  restoreApp: (id: string, version: number) => req<AppRow>(`/api/apps/${id}/restore`, { method: 'POST', body: JSON.stringify({ version }) }),
+  /** Remix / 克隆：复制成独立新项目（未发布）。 */
+  cloneApp: (id: string) => req<AppRow>(`/api/apps/${id}/clone`, { method: 'POST' }),
   renameApp: (id: string, name: string) =>
     req<AppRow>(`/api/apps/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   deleteApp: (id: string) => req<{ ok: boolean }>(`/api/apps/${id}`, { method: 'DELETE' }),

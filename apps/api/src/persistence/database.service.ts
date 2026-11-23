@@ -68,6 +68,14 @@ export class DatabaseService implements OnModuleInit {
         detail_json TEXT,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS app_versions (
+        id TEXT PRIMARY KEY,
+        app_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        data_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(app_id, version)
+      );
     `);
 
     // v3 迁移：已部署的数据库没有这些列，ALTER 失败（列已存在）时忽略。
@@ -86,6 +94,8 @@ export class DatabaseService implements OnModuleInit {
     // v4：runs.usage_json：主 Agent 各轮调用的 token 用量
     // {promptTokens, completionTokens, totalTokens, modelCalls}；子 Agent 的用量不在内。
     addColumn('ALTER TABLE runs ADD COLUMN usage_json TEXT');
+    // @ 指定 Agent：run 记录里被 @ 的人名（仅提示，不改路由）。
+    addColumn('ALTER TABLE runs ADD COLUMN mentioned_agent TEXT');
     addColumn('ALTER TABLE apps ADD COLUMN published_json TEXT');
     addColumn('ALTER TABLE apps ADD COLUMN published_version INTEGER DEFAULT 0');
   }

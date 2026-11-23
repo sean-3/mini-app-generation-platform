@@ -244,3 +244,62 @@ Stage A 真模型工作正常：匹配 signup 模板、出需求 + 架构，3 �
 - 注意：eval 发布后不是瞬间就有——回放刚发布时 eval 为 null，30 秒后才有（95 分）。因为 review agent 本身还要跑一次模型调用，算分在它返回后的 finally 里做；比原来“等模型调 compute_eval 好几分钟”快得多，且一定有。发布瞬间就有需要把 review 的模型调用和算分拆开，没做。
 - 第二次线上真生成（run ba02369e，2026-11-23 15:04 发布，app 79008353，eval 99 分）：这次模型没自己编数据，直接用了模板 seed；入库数据只有 signups 一个顶层键，6 条报名全带 building/slot/phone/items（items 为空字符串），三档时间段都有分布——归一化兜底已验证。
 - 浏览器点检（2026-11-23 15:06–15:07，线上 v5 + 新模板）：表格各列都有值（序号/姓名/楼栋房号/脱敏手机号/三档时间段/人数/备注），组织者统计区显示且内部口径一致（共 11 份 · 6 人报名 · 还剩 9 个名额，各时段分布与逐行人数相符），表单项齐全；只看未改，未产生新数据。两个“注意”经核实不是问题：① 统计区“还剩 9 个名额”按模板上限 20 人算，需求里的“30 份”是鸡蛋总量不是人数，单位不同；② 需求只提下午/晚上两个时段，页面有上午档——那是模板固定的三档选项，seed 三档都有分布。真正的问题：购买内容列 6 行全空——seed 本来就没有 items，列摆在那是摆设。修法：列只在有数据时显示（`hasItems`），模型生成的数据带 items 时列才出现，不造假数据。干净构建、56/56 测试通过。
+
+### 差距分析 7 项补齐（2026-11-23 15:23–16:00，本地；按 Xiao 定的新顺序 ④→⑤→⑥→⑦→①→②→③）
+
+背景：`../atoms-gap-analysis-2026-11-23.md` 对过 71 个功能点（已实现 10、部分 22、缺失 16、做不了 23），Xiao 说“按照你的分析实现”，又定了顺序“优先先实现核心功能”：④ 对话继续改 → ⑤ 代码 tab JSON 可编辑 → ⑥ Diff 对比 → ⑦ Remix → ① @ 指定 Agent → ② 版本 Restore → ③ 审批卡标注。逐项做完一项自测一项，不并行改同一文件。基线 56/56 单测（8 个 suite），做完 96/96（13 个 suite）。全部本地 HTTP 自测都用 /tmp 临时 DATA_DIR，没动线上数据；不碰部署和推送。
+
+#### ④ 对话继续改，只改数据版
+
+- 改了什么：新增 `POST /api/apps/:id/edit {input}`。`AppsService.editData`（apps.service.ts）注入 `ModelGatewayService`（第 4 个构造参数，e2e 的构造点同步改了）：单次模型调用，prompt 给当前 data_json + 用户一句话 + 模板字段，要求只输出完整的新 data_json（不许改 template_id、不许改结构、不许加模板外的顶层字段）；解析用 `parseJsonLoose`（从 agent.service.ts 底抽到 `apps/api/src/common/json.ts`，agent.service.ts 改 import）；服务端 `TemplatesService.parseData` 归一化校验后才写工作区 data_json，不动 published_json；校验失败抛 400，不落库；返回 `{app, changes}`，changes 是新纯函数 `summarizeChanges`（`apps/api/src/apps/diff.ts`）算的顶层变化（数组按长度，如“signups：6 条 → 7 条”；标量截断一行）。没 key 时直接 400（和 createRun 一致），不调模型、不冒充。确定性剧本加 `'edit'` 阶段（deterministic-scripts.ts，`DeterministicContext` 加 `currentData`）：含“加”往主数组尾部加一条、含“删”去掉最后一条，其他原样返回。
+- 前端：`apps/web/src/edit-intent.ts` 纯函数 `isEditIntent`（改动词：改/改成/加/删等；提到别的模板名或带“我要/新建/新做”→ 新做；拿不准一律新做）；`sendChat`：已有应用且判为改动 → 调 `api.editApp`，聊天里显示“已改了工作区数据：…，点 Update 发布生效”，并列出改了哪几项；否则开新 run。输入框下方文案改成“输入改数据的要求（如‘加一条报名’）会直接改当前应用，点 Update 发布生效；要新做一个，点「新对话」或回首页输入”，并加“新对话”按钮（回首页）。附带修了一个旧毛病：以前项目页发新 run 后输入框里的文字还留着，现在 startRun 成功后清掉（edit 分支本来就清）。
+- 注意：任务书里 e2e 例子“改上限”落不到数据——cap 是模板级常量，不在 data_json 里；数据版只覆盖数据字段的改动。e2e 改用“加一条报名”。
+- 测试：干净构建；77/77 单测（新增 21 个：diff.spec 6、apps-edit.spec 6、web-pure.spec 8、agent.e2e.spec 1——完整 run 发布后 edit“加一条报名”→ 工作区 6→7 条、线上快照仍 6 条、版本仍 v1，再 Update → v2 7 条）。中途两个失败都是单测期望写错，不是实现错：“删最后一条报名”——EDIT_VERBS 漏了裸“删”，已补；标量截断单测的字符串没超过 24 字，已改用 repeat 算期望。
+- 本地 HTTP 自测（端口 3111，DATA_DIR=/tmp/edit-verify-data，无 key）：`POST /api/apps/:id/edit` 返回 400（MOONSHOT_API_KEY 未设置），数据未动（仍 6 条报名）。完整 edit 流程过 HTTP 没法验（本机没 key，真模型调不了），由确定性单测 + e2e 覆盖。
+- 没验证的：真模型跑一次对话改（本地没 key）；浏览器里点一遍改动流程（本机没有浏览器操作入口）。
+
+#### ⑤ 代码 tab 的 JSON 可编辑
+
+- 改了什么：只改 `apps/web/src/App.tsx`。代码 tab 的“应用数据 JSON”从只读 `<pre>` 改成：点“编辑 JSON”出现可编辑 textarea（当前数据的 pretty JSON）+ 保存/取消；保存先本地 JSON.parse（格式不对界面显示错误，不保存），再调已有 `PATCH /api/apps/:id/data`（服务端 parseData 归一化校验，失败界面显示错误，不保存）；成功后预览即时更新（未发布改动）。草稿（未落库的 run）仍只读；切走代码 tab 或打开别的项目时丢弃未保存的编辑。
+- 测试：没加新接口（复用 PATCH，updateData 的单测已覆盖），干净构建，77/77 单测全过。
+- 本地 HTTP 自测（端口 3112，DATA_DIR=/tmp/codeedit-verify-data）：PATCH 合法 JSON（7 条报名）200，工作区 7 条、线上快照仍空；PATCH 非法数据（count 不是数字）400。
+- 没验证的：浏览器里点一遍编辑/保存/报错（本机没有浏览器操作入口）。
+
+#### ⑥ Diff 对比
+
+- 改了什么：前端纯函数 `apps/web/src/diff.ts` 的 `diffSummary(publishedJson, currentJson)`，和后端 `summarizeChanges` 同规则（顶层键新增/删除/修改，数组按长度，不展开逐行；任一侧解析失败或未发布过返回 []）。没加后端接口。新增 `DiffBlock` 组件（`App.tsx`）：有未发布改动时显示“本次改动”列表，无改动时什么都不渲染；用在发布面板（主入口）和架构/发布两张审批卡里。审批卡里正常跑流程时 app 是 null，所以平时不显示；只有从历史记录打开旧 run 且当前应用有未发布改动时才出现。
+- 测试：干净构建；83/83 单测（新增 6 个 diffSummary 单测：数组 6→7、未发布为空、数据一致为空、同长内容改动、新增/删除键、两边坏 JSON 都返回 [] 不抛错）。中途一个失败：坏 published_json 被当成空对象，导致全量报“新增”；修法是解析失败直接返回 []。
+- 本地 HTTP 自测（端口 3113，DATA_DIR=/tmp/diff-verify-data）：建应用 → 发布 v1 → PATCH 改数据 → GET 应用：published 6 条、workspace 7 条、版本 v1——diff 的两个输入齐全，对应“signups：6 条 → 7 条”。
+- 没验证的：浏览器里看发布面板和审批卡的“本次改动”实际渲染（本机没有浏览器操作入口）。
+
+#### ⑦ Remix（克隆）
+
+- 改了什么：新增 `POST /api/apps/:id/clone`（`AppsService.clone` + controller）。复制当前应用成独立新项目：新 id、名字后加“副本”、data_json 照搬、published_json 为空、published_version 0；版本快照不复制。前端版本卡的“克隆”按钮接通（原来 toast“克隆未接”）：点后调接口、刷新项目列表、跳到新项目页，提示“已复制为「…副本」，未发布。”
+- 测试：干净构建；86/86 单测（新增 apps-clone.spec 3 个：已发布应用克隆后新 id/“副本”后缀/数据照搬/未发布、原应用不受影响；未发布应用克隆；未知应用 404）。
+- 本地 HTTP 自测（端口 3114，DATA_DIR=/tmp/clone-verify-data）：`POST /api/apps/:id/clone` 返回新 id、名字“活动报名 / 接龙 副本”、published_version 0、数据 6 条报名；未知应用 404；列表 2 个应用。
+- 没验证的：浏览器里点克隆、确认跳到新项目页（本机没有浏览器操作入口）。
+
+#### ① @ 指定 Agent
+
+- 改了什么：后端：`runs` 表加 `mentioned_agent TEXT`（database.service.ts 的 ALTER 迁移，旧库能升）；`RunRow` 加字段；`createRun` 接受 `mentionedAgent`，只认 Mike/Iris/Emma/Bob/Alex 五个人名，其他值忽略存 null；提示进 system prompt：`mentionLine`（agent.service.ts）给四个主 Agent 入口提示（Plan、Stage A 团队版、Stage A 简化版、Engineer）各加一句“用户指定了 @X 参与本轮，仅作提示，路由仍按所选模式走”，子代理提示不动；controller 的 POST /api/runs 透传字段。前端：`apps/web/src/mention.ts` 纯函数 `findMentionQuery`（光标前最后一个 @ 后的词；@ 前不是开头/空白（如邮箱）不算；@ 后有空格或超 10 字不算）；项目页聊天输入框：Team Mode 开且非 Engineer 模式时，输入 @ 弹 5 人名单（按输入过滤），点选把“@名字 ”插进输入框并记下来；Team Mode 关时不弹；名字从输入里删掉后记录也清掉；提交时带进 createRun，聊天里用户气泡下方显示“@Bob 参与本轮（仅提示，路由仍按所选模式走）”；路由不变。只在项目页做，首页输入框不弹。
+- 测试：干净构建；93/93 单测（新增 7 个：e2e 1 个——createRun 记 Bob、走到架构审批仍记着、未知人名存 null、没 @ 存 null；web-pure.spec 6 个 findMentionQuery 单测）。中途一个失败：e2e 里多建的两个 run 没等 pipeline 走到审批门就结束单测，afterEach 删了临时目录后后台写库报 readonly；修法是三个 run 都等到 awaiting_architecture 再结束。
+- 本地 HTTP 自测（端口 3115，DATA_DIR=/tmp/mention-verify-data，无 key）：`POST /api/runs` 带 mentionedAgent:"Bob" 返回 400（key 未设置，路由接受该字段），没建 run。完整 @ 流程过 HTTP 没法验（本机没 key），由 e2e + 前端纯函数单测覆盖。
+- 没验证的：真模型跑一次 @ 流程（本地没 key）；浏览器里输 @ 看名单弹出、点选、提交后聊天显示（本机没有浏览器操作入口）。
+
+#### ② 版本 Restore
+
+- 改了什么：新表 `app_versions`（id, app_id, version, data_json, created_at，app_id+version 唯一，database.service.ts 的 CREATE TABLE）；`publishUpdate` 每次成功发布写一行快照；新增 `GET /api/apps/:id/versions`（新在前）和 `POST /api/apps/:id/restore {version}`（`AppsService.listVersions`/`restore` + controller）：把该版本数据拷回工作区 data_json（parseData 再校验一次），变成未发布改动，不动线上快照；版本不存在返回 400。前端：发布面板里加“历史版本”列表（打开面板时加载），每行“vN · 时间（线上版）”+“恢复到此版本”按钮，点后提示“已恢复到工作区，请点 Update 发布。”
+- 注意：这次改动之前已发布的应用没有 app_versions 行——恢复那些版本会 400，直到下一次发布写出快照。
+- 测试：干净构建；96/96 单测（新增 apps-restore.spec 3 个：v1 发布 → 改数据 → v2 发布 → 版本列表 [2,1] → 恢复 v1（工作区 6 条、线上仍 v2 7 条）→ 再 Update 得 v3 6 条、列表 [3,2,1]；恢复不存在的版本 400 且数据未动；未知应用 404）。中途一个失败：`DatabaseService` 没有 `all` 方法，只有 `query`；已改。
+- 本地 HTTP 自测（端口 3116，DATA_DIR=/tmp/restore-verify-data）：`GET /api/apps/:id/versions` 返回 [2, 1]；`POST /api/apps/:id/restore {"version":1}` 后工作区 6 条、线上仍 v2 7 条；恢复 v99 返回 400。
+- 没验证的：浏览器里在发布面板点“恢复到此版本”（本机没有浏览器操作入口）。
+
+#### ③ 审批卡加模式归属标注
+
+- 改了什么：只改 `apps/web/src/App.tsx` 文案和展示，审批逻辑不动。三个审批卡标题带模式：计划卡固定“审批 0 · 计划确认 · Plan 模式”，架构卡“审批 1 · 架构确认 · {MODE_LABEL[run.mode]}”，发布卡“审批 2 · 发布确认 · {MODE_LABEL[run.mode]}”（MODE_LABEL：build→Build 模式、plan→Plan 模式、engineer→Engineer 模式）；每张卡加一行“Demo 设定：每轮生成都需人工确认。”默认 Build 的两道审批保留（Xiao 最初产品定义）。
+- 测试：没加新逻辑，不加单测；干净构建，96/96 单测全过；构建产物里 grep 到三张卡的新标题和 Demo 设定行。
+- 没验证的：浏览器里实际看到三张卡（本机没有浏览器操作入口）。
+
+### 注意（自测过程）
+
+- 前几轮 HTTP 自测的 `kill %1` 没杀掉后台起的 API 服务，4 个孤儿进程（端口 3111–3114，DATA_DIR 都在 /tmp）一直跑着，2026-11-23 发现后手动 kill 干净；之后的自测改用 pid 文件起停，并确认“server stopped”。线上数据没动过。
