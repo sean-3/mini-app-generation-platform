@@ -151,14 +151,38 @@ function Quote({ app, onSaved }: { app: AppRow; onSaved?: (a: AppRow) => void })
   );
 }
 
+/** 自取时间段选项。必须和 apps/api/src/templates/templates.service.ts 里的 SIGNUP_SLOTS 一致。 */
+const SLOTS = ['上午 09:00-11:00', '下午 16:00-18:00', '晚上 18:00-20:00'];
+
+type SignupRow = { id: string; name: string; count: number; note?: string; building?: string; slot?: string; phone?: string };
+
+/** 手机号脱敏：前三后四，中间 ****；太短的直接原样显示（空即空）。 */
+const maskPhone = (p?: string) => (p && p.length >= 7 ? `${p.slice(0, 3)}****${p.slice(-4)}` : (p ?? ''));
+
 function Signup({ app, onSaved, cap }: { app: AppRow; onSaved?: (a: AppRow) => void; cap: number }) {
   const editable = !!onSaved;
-  const data = JSON.parse(app.data_json) as { signups: Array<{ id: string; name: string; count: number; note?: string }> };
+  const data = JSON.parse(app.data_json) as { signups: SignupRow[] };
   const [name, setName] = useState('');
+  const [building, setBuilding] = useState('');
+  const [phone, setPhone] = useState('');
   const [count, setCount] = useState('1');
+  const [slot, setSlot] = useState(SLOTS[0]);
   const [note, setNote] = useState('');
   const [blocked, setBlocked] = useState(false);
-  const total = data.signups.reduce((s, p) => s + p.count, 0);
+  // 向后兼容：老数据没有 building/slot/phone，缺失时给默认值（楼栋空、时间段第一项、手机空）。
+  const signups = data.signups.map((p) => ({
+    ...p,
+    building: p.building ?? '',
+    slot: p.slot && SLOTS.includes(p.slot) ? p.slot : SLOTS[0],
+    phone: p.phone ?? '',
+  }));
+  const total = signups.reduce((s, p) => s + p.count, 0);
+  const remaining = Math.max(0, cap - total);
+  // 组织者统计：由报名数据现算，不存冗余字段。
+  const bySlot = SLOTS.map((s) => {
+    const rows = signups.filter((p) => p.slot === s);
+    return { slot: s, people: rows.length, count: rows.reduce((n, p) => n + p.count, 0) };
+  });
 
   const join = async () => {
     const n = Number(count);
@@ -168,28 +192,40 @@ function Signup({ app, onSaved, cap }: { app: AppRow; onSaved?: (a: AppRow) => v
       return;
     }
     setBlocked(false);
-    const next = { ...data, signups: [...data.signups, { id: `s${Date.now()}`, name: name.trim(), count: n, note }] };
+    const next = { ...data, signups: [...data.signups, { id: `s${Date.now()}`, name: name.trim(), count: n, note, building: building.trim(), slot, phone: phone.trim() }] };
     onSaved(await api.updateAppData(app.id, next));
     setName('');
+    setBuilding('');
+    setPhone('');
     setCount('1');
+    setSlot(SLOTS[0]);
     setNote('');
   };
 
   return (
     <div>
       <div className="kv"><span>已报名</span><b>{total} / {cap} 人</b></div>
+      <div className="kv"><span>组织者统计</span><b>共 {total} 份 · {signups.length} 人报名 · 还剩 {remaining} 个名额</b></div>
+      {bySlot.map((b) => (
+        <div className="kv" key={b.slot}><span>{b.slot}</span><span>{b.people} 人 · {b.count} 份</span></div>
+      ))}
       <table className="data">
-        <thead><tr><th>姓名</th><th>人数</th><th>备注</th></tr></thead>
+        <thead><tr><th>#</th><th>姓名</th><th>楼栋房号</th><th>手机号</th><th>自取时间段</th><th>人数</th><th>备注</th></tr></thead>
         <tbody>
-          {data.signups.map((p) => (
-            <tr key={p.id}><td>{p.name}</td><td>{p.count}</td><td>{p.note ?? ''}</td></tr>
+          {signups.map((p, i) => (
+            <tr key={p.id}><td>{i + 1}</td><td>{p.name}</td><td>{p.building}</td><td>{maskPhone(p.phone)}</td><td>{p.slot}</td><td>{p.count}</td><td>{p.note ?? ''}</td></tr>
           ))}
         </tbody>
       </table>
       {blocked && <div className="intercept" style={{ marginTop: 10 }}><h3>人数已满</h3><p>再加 {count} 人会超过上限 {cap} 人，本次报名没有写入。</p></div>}
       {editable && <div className="form-grid" style={{ marginTop: 10 }}>
         <input className="input" placeholder="姓名" value={name} onChange={(e) => setName(e.target.value)} />
+        <input className="input" placeholder="楼栋房号（可选）" value={building} onChange={(e) => setBuilding(e.target.value)} />
+        <input className="input" placeholder="手机号（可选）" inputMode="tel" value={phone} onChange={(e) => setPhone(e.target.value)} />
         <input className="input" type="number" placeholder="人数" value={count} onChange={(e) => setCount(e.target.value)} />
+        <select className="input" value={slot} onChange={(e) => setSlot(e.target.value)}>
+          {SLOTS.map((s) => <option key={s}>{s}</option>)}
+        </select>
         <input className="input full" placeholder="备注（可选）" value={note} onChange={(e) => setNote(e.target.value)} />
         <button className="btn primary full" onClick={join}>报名</button>
       </div>}

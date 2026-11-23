@@ -128,6 +128,7 @@ export default function App() {
   const [view, setView] = useState<'home' | 'project'>('home');
   const [templates, setTemplates] = useState<Template[]>([]);
   const [apps, setApps] = useState<AppSummary[]>([]);
+  const [appsLoading, setAppsLoading] = useState(true);
   const [runsList, setRunsList] = useState<RunRow[]>([]);
   const [input, setInput] = useState('');
   const [mode, setMode] = useState<RunMode>('build');
@@ -218,7 +219,7 @@ export default function App() {
 
   useEffect(() => {
     void api.templates().then(setTemplates).catch(() => setTemplates([]));
-    void api.listApps().then(setApps).catch(() => setApps([]));
+    void api.listApps().then((a) => { setApps(a); setAppsLoading(false); }).catch(() => { setApps([]); setAppsLoading(false); });
     void api.health().then((h) => setModelInfo(h.model ?? null)).catch(() => setNotice('后端未启动：请先在项目根目录跑 docker compose up，或 npm run dev:api'));
     return () => {
       unsubRef.current?.();
@@ -594,7 +595,9 @@ export default function App() {
             <div id="proj-list">
               <div className="proj-head"><h2>项目</h2><span className="small">{filteredApps.length} 个</span></div>
               {notice && <div className="guidance" style={{ marginBottom: 12 }}>{notice}</div>}
-              {filteredApps.length === 0 ? (
+              {appsLoading ? (
+                <p className="muted">正在加载项目…</p>
+              ) : filteredApps.length === 0 ? (
                 <p className="muted">还没有保存的应用。上面输入一句话，生成一个并发布后会出现在这里。</p>
               ) : (
                 <div className="proj-grid">
@@ -880,7 +883,7 @@ export default function App() {
                   <div className="grow"><b>线上应用版本</b><span className="small">{app ? (app.published_version > 0 ? `已发布 v${app.published_version}${dirty ? '，有未发布改动' : ''}` : '未发布（Preview）') : '暂无应用'}</span></div>
                 </div>
                 <div className="ov-row">
-                  <div className="grow"><b>评估分数</b><span className="small">{replay?.eval ? `成功率 ${Math.round(replay.eval.successRate * 100)}% · ${replay.eval.steps} 步 · ${(replay.eval.durationMs / 1000).toFixed(1)}s · ${replay.eval.toolCalls} 次工具调用` : '本轮还没有评估结果（发布完成后生成）'}</span></div>
+                  <div className="grow"><b>评估分数</b><span className="small">{replay?.eval ? `评分 ${replay.eval.score} 分 · 成功率 ${Math.round(replay.eval.successRate * 100)}% · ${replay.eval.steps} 步 · ${(replay.eval.durationMs / 1000).toFixed(1)}s · ${replay.eval.toolCalls} 次工具调用` : '本轮还没有评估结果（发布完成后生成）'}</span></div>
                 </div>
                 <div className="ov-row">
                   <div className="grow"><b>Token 用量</b><span className="small">{usage ? `${usage.totalTokens} tokens（输入 ${usage.promptTokens} / 输出 ${usage.completionTokens}，${usage.modelCalls} 次调用）` : '暂无'} · 模型 {modelInfo?.model ?? 'kimi-k3'}</span></div>
@@ -953,6 +956,7 @@ export default function App() {
                     <h3>回放 · {d.run.input.slice(0, 32)}</h3>
                     {d.eval ? (
                       <div className="score" style={{ marginBottom: 12 }}>
+                        <div className="cell"><b>{d.eval.score}</b><span>评分</span></div>
                         <div className="cell"><b>{Math.round(d.eval.successRate * 100)}%</b><span>成功率</span></div>
                         <div className="cell"><b>{d.eval.steps}</b><span>步数</span></div>
                         <div className="cell"><b>{(d.eval.durationMs / 1000).toFixed(1)}s</b><span>耗时</span></div>

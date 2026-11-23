@@ -215,3 +215,23 @@ Stage A 真模型工作正常：匹配 signup 模板、出需求 + 架构，3 �
 - 浏览器点击级自测（本机没有可用的浏览器操作入口）：首页输入 → 生成 → 两道审批 → 发布 → 各 tab 切换 → 分享/发布面板的完整点一遍流程，没点过。部署后主 agent 用浏览器点一遍。
 - 360px 真机检查：只做了静态核对（≤760px 单列、边栏变顶栏、窄栏隐藏、面板/模态框 max-width 100%、手机框 max-width 100%、菜单 min-width 300px 在 360px 视口内放得下），没在真机上量过。
 - 真模型循环本地仍验证不了（没 key），同 v4。
+
+### v5 线上复测（2026-11-23 13:06–13:23，真模型 kimi-k3）
+
+- run 7f3dd1e3（Build / Team 关）：创建成功，Stage A 真模型跑通（匹配 signup 模板，需求+架构，3 次调用 / 10,564 token），两道审批都通过，发布成功（app 4d185daf），全程 10 次调用 / 32,346 token。
+- 问题：回放 eval 仍是 null。trace 只有 8 条（6 个工具 + 2 个审批），run_smoke_tests 调了一次，compute_eval 一次没调。
+- 根因：复盘（executeReview）是模型驱动的——prompt 让模型先调 run_smoke_tests 再调 compute_eval，但模型调完第一步就直接收尾了，根本没调第二步。之前那个“服务端绑定 runId”的修复只修了“模型传错 runId 导致 eval 写到别的 run 下”，没修“模型根本不调”这个失败模式。
+- 修复（agent.service.ts 的 executeReview）：评估不再交给模型调工具。prompt 里只留 run_smoke_tests 一步；agent 跑完后（try/finally，不管成败）服务端直接调 evalService.compute(runId) 算分落库，并记一条 compute_eval 的 trace，再发 eval_ready。本地验证：干净构建，47/47 测试全过（含 e2e：full run → published + eval 落库）。
+- 注意：已发布的 run 7f3dd1e3 的 eval 还是 null（它的复盘在修复前就跑完了），新代码只对之后发布的 run 生效，需再跑一次线上真生成验证。
+- 更正（2026-11-23 14:30 后复查）：上面“eval 仍是 null”的结论是查早了。复盘 agent 的第二次模型调用很慢，14:30 复查同一 run 的回放：eval 已在，`{successRate: 1, steps: 8, durationMs: 20983, toolCalls: 6, errorCalls: 0, score: 100}`，compute_eval 的 trace 也在（executed ok），usage 长到 39,005 tokens / 12 次调用。也就是说第一版修复（服务端绑定 runId）本身是有效的，模型最终调了 compute_eval，只是慢。服务端直接算分的改动仍保留：评估不再依赖模型调不调、也不用等几分钟，发布后立刻落库。
+- 浏览器点检（2026-11-23 14:26–14:30，线上 v5）：首页、项目页、概览/代码/回放三个 tab、分享/发布面板、移动预览全部可用，无白屏无报错。发现两个小问题，已修（本地干净构建、47/47 测试）：（1）评估分数的数字没显示出来——API 里 score 是 100，但界面只写了成功率/步数/耗时/调用次数，没写“100 分”，已在概览和回放两处把分数补上；（2）首页项目列表首次加载时先闪“还没有保存的应用”，因为加载中和空列表用的是同一文案，已加“正在加载项目…”状态。另有一处内容缺口（未修，需定夺）：聊天总结里说的楼栋房号、自取时间段选择器、组织者统计，预览表单里没有——接龙模板的字段是固定的，模型许诺的比模板能画的多；要补得改模板字段。
+
+### signup 模板补字段（2026-11-23 14:42–14:47，本地）
+
+- 背景：线上 Atoms 实测的团购接龙有称呼/楼栋/手机号/份数、自取时段、接龙序号、组织者看板；我们的 signup 模板只有姓名/份数/备注。按 atoms 实现补齐（含手机号：可选字段，名单里脱敏显示前三后四，中间 ****）。
+- 改了什么：schema 增加 `building`（文本，可空，默认 ''）、`slot`（枚举三档：上午 09:00-11:00、下午 16:00-18:00、晚上 18:00-20:00，默认第一项）和 `phone`（文本，可空，默认 ''）；`fields` 和模板描述同步加了楼栋房号/自取时间段/手机号；seed 的 6 条演示报名（小明、阿华、小红、大刘、小美、老陈）补了楼栋房号、时间段和演示手机号（13800000001–13800000006），人数份数不变（6 人共 11 份，三档时间段都有）；preview 的报名表单加楼栋房号输入 + 手机号输入 + 自取时间段下拉，名单加序号/楼栋/手机号（脱敏）/时间段列，新增组织者统计区（共 11 份 · 6 人报名 · 还剩 9 个名额 + 各时间段人数/份数分布，由报名数据现算，不存冗余字段）。另：`updateData` 校验失败改抛 `BadRequestException`，无效数据现在返回 400（以前是 500）。
+- 向后兼容：新字段都是 `.optional().default(...)`，老数据（没有这两个字段）仍通过校验；`updateData` 校验走同一 schema；e2e 里推老形状数据的测试仍通过。渲染侧对缺失字段也给了默认值（楼栋空、时间段第一项），非法时间段用第一项兜底。
+- draft 数据：不用改 deterministic-scripts.ts 和 agent.service.ts——Stage B 的 draft 一律用 `seedData`（save_draft 省略 data 时取模板 seed），seed 补了字段就自动带上。
+- 测试：干净构建，53/53 单测全过（新增 6 个：新字段合法通过、非法时间段拒绝、楼栋非文本拒绝、老数据无新字段仍通过、seed 六条全带合法 building/slot/phone 且共 11 份、phone 可选且老数据仍通过）。e2e 全流程仍通过。
+- 本地 HTTP 自测（端口 3109，DATA_DIR=/tmp/phone-verify-data，无 key）：`GET /api/templates` 的 signup fields 含楼栋房号/手机号/自取时间段；`POST /api/apps` 建 signup 应用，seed 六条全带 building/slot/phone；PATCH 老形状数据 200；PATCH 合法新数据（含手机号）200；PATCH 非法时间段 → 400 `{"message":"data invalid: signups.0.slot Invalid option: expected one of \"上午 09:00-11:00\"|\"下午 16:00-18:00\"|\"晚上 18:00-20:00\"","error":"Bad Request","statusCode":400}`（已不是以前的 500）。
+- 没验证的：浏览器里点一遍新表单和统计区（本机没有可用的浏览器操作入口）；真模型跑一次新模板全流程（本地没 key）；线上部署后复测（由主 agent 推 + 部署）。

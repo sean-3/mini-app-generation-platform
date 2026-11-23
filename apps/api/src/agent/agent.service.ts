@@ -627,13 +627,20 @@ export class AgentService {
       systemPrompt:
         'You are Mike, the team coordinator. Do these steps in order, each exactly once:\n' +
         '1. Call run_smoke_tests (no arguments — the published app is already bound).\n' +
-        '2. Call compute_eval (no arguments — the current run is already bound).\n' +
-        '3. Reply with ONLY the text: review done' +
-        toolRules(['run_smoke_tests', 'compute_eval']),
+        '2. Reply with ONLY the text: review done' +
+        toolRules(['run_smoke_tests']),
     });
-    await agent.invoke({ messages: [new HumanMessage('post-publish review')] });
-    const ev = this.evalService.latest(runId);
-    this.hub.emit(runId, 'eval_ready', '评估', ev);
+    try {
+      await agent.invoke({ messages: [new HumanMessage('post-publish review')] });
+    } finally {
+      // 评估不交给模型调工具：线上实测 run 7f3dd1e3 里模型只调了 run_smoke_tests
+      // 就收尾了，compute_eval 一次没调，回放 eval 一直是 null。改成服务端直接算分，
+      // 不管 review agent 成败都落库（eval 只从 trace 算分，不依赖模型输出）。
+      const started = Date.now();
+      const ev = this.evalService.compute(runId);
+      this.recordTrace(runId, 'Mike', 'tool', 'compute_eval', JSON.stringify({}), JSON.stringify(ev), false, Date.now() - started);
+      this.hub.emit(runId, 'eval_ready', '评估', ev);
+    }
   }
 
   // ---------------- helpers ----------------

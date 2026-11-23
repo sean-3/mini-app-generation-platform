@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { DatabaseService } from '../persistence/database.service';
 import { TemplatesService, type TemplateId } from '../templates/templates.service';
@@ -76,7 +76,7 @@ export class AppsService {
   updateData(id: string, data: unknown): AppRow {
     const app = this.get(id);
     const v = this.templates.validateData(app.template_id as TemplateId, data);
-    if (!v.valid) throw new Error(`data invalid: ${v.errors.join('; ')}`);
+    if (!v.valid) throw new BadRequestException(`data invalid: ${v.errors.join('; ')}`);
     this.db.run('UPDATE apps SET data_json = ?, updated_at = ? WHERE id = ?', JSON.stringify(data), new Date().toISOString(), id);
     return this.get(id);
   }

@@ -3,6 +3,9 @@ import { z } from 'zod';
 
 export type TemplateId = 'ledger' | 'habit' | 'quote' | 'signup';
 
+/** 接龙自取时间段选项。改这里要同步改 apps/web/src/preview.tsx 里的 SLOTS。 */
+export const SIGNUP_SLOTS = ['上午 09:00-11:00', '下午 16:00-18:00', '晚上 18:00-20:00'] as const;
+
 export interface AppTemplate {
   id: TemplateId;
   name: string;
@@ -56,6 +59,12 @@ const signupSchema = z.object({
       name: z.string(),
       count: z.number().int().positive(),
       note: z.string().optional().default(''),
+      // 向后兼容：老数据没有这两个字段也能通过校验，缺失时给默认值
+      // （楼栋房号默认空、自取时间段默认第一项）；新数据必须符合校验。
+      building: z.string().optional().default(''),
+      slot: z.enum(SIGNUP_SLOTS).optional().default(SIGNUP_SLOTS[0]),
+      // 手机号：可选，展示时脱敏（前三后四，中间 ****）；老数据缺失默认空。
+      phone: z.string().optional().default(''),
     }),
   ),
 });
@@ -130,23 +139,27 @@ export class TemplatesService {
     {
       id: 'signup',
       name: '活动报名 / 接龙',
-      description: '填姓名、人数、备注报名，满员自动提示。',
+      description: '填姓名、楼栋房号、手机号、人数、自取时间段、备注报名，满员自动提示，组织者看报名统计。',
       keywords: ['报名', '接龙', '团购', '活动', '拼团', '组织'],
       fields: [
         { key: 'name', label: '姓名', type: 'text' },
+        { key: 'building', label: '楼栋房号', type: 'text' },
+        { key: 'phone', label: '手机号', type: 'text' },
         { key: 'count', label: '人数', type: 'number' },
+        { key: 'slot', label: '自取时间段', type: 'select' },
         { key: 'note', label: '备注', type: 'text' },
       ],
       schema: signupSchema,
       cap: 20,
       seed: () => ({
+        // 演示数据：6 条报名共 11 份，时间段三档都有，楼栋房号为示例值，手机号为演示号（展示时脱敏）。
         signups: [
-          { id: 's1', name: '小明', count: 2, note: '' },
-          { id: 's2', name: '阿华', count: 1, note: '不要辣' },
-          { id: 's3', name: '小红', count: 3, note: '' },
-          { id: 's4', name: '大刘', count: 2, note: '' },
-          { id: 's5', name: '小美', count: 1, note: '' },
-          { id: 's6', name: '老陈', count: 2, note: '自提' },
+          { id: 's1', name: '小明', count: 2, note: '', building: '3栋201', slot: '下午 16:00-18:00', phone: '13800000001' },
+          { id: 's2', name: '阿华', count: 1, note: '不要辣', building: '1栋1203', slot: '晚上 18:00-20:00', phone: '13800000002' },
+          { id: 's3', name: '小红', count: 3, note: '', building: '5栋802', slot: '下午 16:00-18:00', phone: '13800000003' },
+          { id: 's4', name: '大刘', count: 2, note: '', building: '2栋305', slot: '晚上 18:00-20:00', phone: '13800000004' },
+          { id: 's5', name: '小美', count: 1, note: '', building: '3栋1501', slot: '上午 09:00-11:00', phone: '13800000005' },
+          { id: 's6', name: '老陈', count: 2, note: '自提', building: '1栋608', slot: '下午 16:00-18:00', phone: '13800000006' },
         ],
       }),
     },

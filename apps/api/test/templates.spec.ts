@@ -1,4 +1,4 @@
-import { TemplatesService } from '../src/templates/templates.service';
+import { SIGNUP_SLOTS, TemplatesService } from '../src/templates/templates.service';
 
 describe('TemplatesService', () => {
   const svc = new TemplatesService();
@@ -33,5 +33,56 @@ describe('TemplatesService', () => {
 
   it('signup template has a cap', () => {
     expect(svc.get('signup')?.cap).toBe(20);
+  });
+
+  it('signup: new fields validate (building + slot)', () => {
+    const v = svc.validateData('signup', {
+      signups: [{ id: 's1', name: '小明', count: 2, note: '', building: '3栋201', slot: '下午 16:00-18:00' }],
+    });
+    expect(v.valid).toBe(true);
+  });
+
+  it('signup: slot must be one of the options', () => {
+    const v = svc.validateData('signup', {
+      signups: [{ id: 's1', name: '小明', count: 2, building: '', slot: '半夜 00:00-01:00' }],
+    });
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/slot/);
+  });
+
+  it('signup: building must be text', () => {
+    const v = svc.validateData('signup', {
+      signups: [{ id: 's1', name: '小明', count: 2, building: 201 }],
+    });
+    expect(v.valid).toBe(false);
+  });
+
+  it('signup: old data without the new fields still validates (backward compatible)', () => {
+    const v = svc.validateData('signup', {
+      signups: [{ id: 's1', name: '小明', count: 2, note: '' }],
+    });
+    expect(v.valid).toBe(true);
+  });
+
+  it('signup: phone is optional and defaults to empty', () => {
+    const v = svc.validateData('signup', {
+      signups: [{ id: 's1', name: '小明', count: 2, note: '', building: '3栋201', slot: '下午 16:00-18:00', phone: '13800000001' }],
+    });
+    expect(v.valid).toBe(true);
+    const old = svc.validateData('signup', {
+      signups: [{ id: 's1', name: '小明', count: 2, note: '' }],
+    });
+    expect(old.valid).toBe(true);
+  });
+
+  it('signup: seed entries all carry building and a valid slot', () => {
+    const data = svc.seedData('signup');
+    expect(data.signups.length).toBe(6);
+    expect(data.signups.reduce((s: number, p: any) => s + p.count, 0)).toBe(11);
+    for (const p of data.signups) {
+      expect(typeof p.building).toBe('string');
+      expect(SIGNUP_SLOTS).toContain(p.slot);
+      expect(typeof p.phone).toBe('string');
+    }
   });
 });
