@@ -184,6 +184,9 @@ function Signup({ app, onSaved, cap }: { app: AppRow; onSaved?: (a: AppRow) => v
     const rows = signups.filter((p) => p.slot === s);
     return { slot: s, people: rows.length, count: rows.reduce((n, p) => n + p.count, 0) };
   });
+  // 购买内容列只在有数据时显示：默认 seed 没有 items，空列摆在那是摆设；
+  // 模型生成的数据带 items 时（团购）列才出现。不造假数据。
+  const hasItems = signups.some((p) => p.items);
 
   const join = async () => {
     const n = Number(count);
@@ -211,10 +214,10 @@ function Signup({ app, onSaved, cap }: { app: AppRow; onSaved?: (a: AppRow) => v
         <div className="kv" key={b.slot}><span>{b.slot}</span><span>{b.people} 人 · {b.count} 份</span></div>
       ))}
       <table className="data">
-        <thead><tr><th>#</th><th>姓名</th><th>楼栋房号</th><th>手机号</th><th>自取时间段</th><th>人数</th><th>购买内容</th><th>备注</th></tr></thead>
+        <thead><tr><th>#</th><th>姓名</th><th>楼栋房号</th><th>手机号</th><th>自取时间段</th><th>人数</th>{hasItems && <th>购买内容</th>}<th>备注</th></tr></thead>
         <tbody>
           {signups.map((p, i) => (
-            <tr key={p.id}><td>{i + 1}</td><td>{p.name}</td><td>{p.building}</td><td>{maskPhone(p.phone)}</td><td>{p.slot}</td><td>{p.count}</td><td>{p.items}</td><td>{p.note ?? ''}</td></tr>
+            <tr key={p.id}><td>{i + 1}</td><td>{p.name}</td><td>{p.building}</td><td>{maskPhone(p.phone)}</td><td>{p.slot}</td><td>{p.count}</td>{hasItems && <td>{p.items}</td>}<td>{p.note ?? ''}</td></tr>
           ))}
         </tbody>
       </table>
