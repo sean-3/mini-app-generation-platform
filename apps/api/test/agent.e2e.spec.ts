@@ -181,6 +181,8 @@ describe('AgentService end-to-end (real DeepAgents loop)', () => {
     const v1 = apps.get(appId);
     expect(v1.published_version).toBe(1);
     expect(v1.published_json).toBe(v1.data_json);
+    // 首次发布也要写 v1 快照（executePublish 直接建应用，不走 publishUpdate）。
+    expect(apps.listVersions(appId).map((v) => v.version)).toEqual([1]);
 
     // 改数据：只动工作区，线上快照不动。
     const data = JSON.parse(v1.data_json);
@@ -195,6 +197,7 @@ describe('AgentService end-to-end (real DeepAgents loop)', () => {
     expect(v2.published_version).toBe(2);
     expect(v2.published_json).toBe(v2.data_json);
     expect(JSON.parse(v2.published_json).signups.length).toBe(7);
+    expect(apps.listVersions(appId).map((v) => v.version)).toEqual([2, 1]);
   }, 60_000);
 
   it('dialogue edit after publish: workspace changes, live snapshot unchanged until Update', async () => {

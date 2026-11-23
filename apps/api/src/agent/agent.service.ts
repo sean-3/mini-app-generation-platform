@@ -628,6 +628,15 @@ export class AgentService {
       now,
       now,
     );
+    // v1 快照：首次发布不走 publishUpdate，这里直接写一行，否则历史版本里没有 v1。
+    this.db.run(
+      'INSERT INTO app_versions (id, app_id, version, data_json, created_at) VALUES (?, ?, ?, ?, ?)',
+      randomUUID(),
+      appId,
+      1,
+      dataJson,
+      now,
+    );
     this.updateRun(runId, { status: 'published', app_id: appId });
     this.hub.emit(runId, 'app_published', 'Mike', { appId });
 

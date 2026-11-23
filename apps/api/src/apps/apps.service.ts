@@ -63,7 +63,8 @@ export class AppsService {
   /**
    * Update（对应 Atoms 的 Update）：把当前工作区数据推成新的线上版。
    * data_json 是工作区（Preview），published_json 是线上快照；改数据只动工作区，
-   * 只有点 Update 才会更新线上版并把版本号 +1。首次发布也是走这里，v0 → v1。
+   * 只有点 Update 才会更新线上版并把版本号 +1。首次发布不走这里——agent 的
+   * executePublish 直接建应用并写 v1 快照（见 agent.service.ts）。
    * 每次成功发布都在 app_versions 里写一行快照（供 Restore 用）。
    */
   publishUpdate(id: string): AppRow {
