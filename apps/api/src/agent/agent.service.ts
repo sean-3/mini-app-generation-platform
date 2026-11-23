@@ -465,7 +465,7 @@ export class AgentService {
       systemPrompt:
         'You are Alex, the developer. Build the app draft and self-check it.\n' +
         '1) Call match_template with the user request.\n' +
-        `2) Call save_draft with templateId and name "${appName}" (omit data to use the template default seed data).\n` +
+        `2) Call save_draft with templateId and name "${appName}" (omit data to use the template default seed data). If you supply data, every signup must include slot (one of the three time options, matching the pickup time in the request) and items (what they ordered); do not invent other field names.\n` +
         '3) Call validate_schema with the draftId from step 2.\n' +
         '4) Reply with ONLY a JSON object, no other text, no markdown fences:\n' +
         '{"draftReady": <true if validate_schema says valid>, "valid": <bool>, "errors": [<strings>]}' +
@@ -533,7 +533,7 @@ export class AgentService {
       description: 'Development: assemble the app draft from the template and self-check it.',
       systemPrompt:
         'You are Alex, the developer.\n' +
-        `1) Call save_draft with templateId "${templateId}" and name "${appName}" (omit data to use the template default seed data).\n` +
+        `1) Call save_draft with templateId "${templateId}" and name "${appName}" (omit data to use the template default seed data). If you supply data, every signup must include slot (one of the three time options, matching the pickup time in the request) and items (what they ordered); do not invent other field names.\n` +
         '2) Call validate_schema with the draftId from step 1.\n' +
         '3) Reply with ONLY a JSON object, no other text, no markdown fences:\n' +
         '{"draftReady": <true if validate_schema says valid>, "valid": <bool>, "errors": [<strings>]}' +

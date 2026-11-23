@@ -75,9 +75,9 @@ export class AppsService {
 
   updateData(id: string, data: unknown): AppRow {
     const app = this.get(id);
-    const v = this.templates.validateData(app.template_id as TemplateId, data);
-    if (!v.valid) throw new BadRequestException(`data invalid: ${v.errors.join('; ')}`);
-    this.db.run('UPDATE apps SET data_json = ?, updated_at = ? WHERE id = ?', JSON.stringify(data), new Date().toISOString(), id);
+    const parsed = this.templates.parseData(app.template_id as TemplateId, data);
+    if (!parsed.ok) throw new BadRequestException(`data invalid: ${parsed.errors.join('; ')}`);
+    this.db.run('UPDATE apps SET data_json = ?, updated_at = ? WHERE id = ?', JSON.stringify(parsed.data), new Date().toISOString(), id);
     return this.get(id);
   }
 

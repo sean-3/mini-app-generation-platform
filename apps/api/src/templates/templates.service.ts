@@ -65,6 +65,8 @@ const signupSchema = z.object({
       slot: z.enum(SIGNUP_SLOTS).optional().default(SIGNUP_SLOTS[0]),
       // 手机号：可选，展示时脱敏（前三后四，中间 ****）；老数据缺失默认空。
       phone: z.string().optional().default(''),
+      // 购买内容：模型生成团购报名时常用（例：草莓1盒 + 土鸡蛋30枚）；预览单独一列，老数据缺失默认空。
+      items: z.string().optional().default(''),
     }),
   ),
 });
@@ -139,13 +141,14 @@ export class TemplatesService {
     {
       id: 'signup',
       name: '活动报名 / 接龙',
-      description: '填姓名、楼栋房号、手机号、人数、自取时间段、备注报名，满员自动提示，组织者看报名统计。',
+      description: '填姓名、楼栋房号、手机号、人数、购买内容、自取时间段、备注报名，满员自动提示，组织者看报名统计。',
       keywords: ['报名', '接龙', '团购', '活动', '拼团', '组织'],
       fields: [
         { key: 'name', label: '姓名', type: 'text' },
         { key: 'building', label: '楼栋房号', type: 'text' },
         { key: 'phone', label: '手机号', type: 'text' },
         { key: 'count', label: '人数', type: 'number' },
+        { key: 'items', label: '购买内容', type: 'text' },
         { key: 'slot', label: '自取时间段', type: 'select' },
         { key: 'note', label: '备注', type: 'text' },
       ],
@@ -199,14 +202,25 @@ export class TemplatesService {
     return t.seed();
   }
 
-  validateData(id: TemplateId, data: unknown): { valid: boolean; errors: string[] } {
+  /**
+   * 解析并归一化数据：成功时返回应用了默认值、去掉未知字段后的数据。
+   * save_draft 和 updateData 都存解析后的结果，不存原始输入——否则模型自造的
+   * 字段（如 items）和缺失的可选字段（如 slot）会原样进库，预览按模板字段
+   * 渲染时对不上（线上 run 6cae5a4e：报名带 items 无 slot，备注列空白、时间段列全是默认上午）。
+   */
+  parseData(id: TemplateId, data: unknown): { ok: boolean; data?: any; errors: string[] } {
     const t = this.get(id);
-    if (!t) return { valid: false, errors: [`unknown template ${id}`] };
+    if (!t) return { ok: false, errors: [`unknown template ${id}`] };
     const parsed = t.schema.safeParse(data);
-    if (parsed.success) return { valid: true, errors: [] };
+    if (parsed.success) return { ok: true, data: parsed.data, errors: [] };
     return {
-      valid: false,
+      ok: false,
       errors: parsed.error.issues.map((i) => `${i.path.join('.')} ${i.message}`),
     };
+  }
+
+  validateData(id: TemplateId, data: unknown): { valid: boolean; errors: string[] } {
+    const r = this.parseData(id, data);
+    return { valid: r.ok, errors: r.errors };
   }
 }

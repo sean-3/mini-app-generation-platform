@@ -235,3 +235,10 @@ Stage A 真模型工作正常：匹配 signup 模板、出需求 + 架构，3 �
 - 测试：干净构建，53/53 单测全过（新增 6 个：新字段合法通过、非法时间段拒绝、楼栋非文本拒绝、老数据无新字段仍通过、seed 六条全带合法 building/slot/phone 且共 11 份、phone 可选且老数据仍通过）。e2e 全流程仍通过。
 - 本地 HTTP 自测（端口 3109，DATA_DIR=/tmp/phone-verify-data，无 key）：`GET /api/templates` 的 signup fields 含楼栋房号/手机号/自取时间段；`POST /api/apps` 建 signup 应用，seed 六条全带 building/slot/phone；PATCH 老形状数据 200；PATCH 合法新数据（含手机号）200；PATCH 非法时间段 → 400 `{"message":"data invalid: signups.0.slot Invalid option: expected one of \"上午 09:00-11:00\"|\"下午 16:00-18:00\"|\"晚上 18:00-20:00\"","error":"Bad Request","statusCode":400}`（已不是以前的 500）。
 - 没验证的：浏览器里点一遍新表单和统计区（本机没有可用的浏览器操作入口）；真模型跑一次新模板全流程（本地没 key）；线上部署后复测（由主 agent 推 + 部署）。
+
+### 模型数据与模板 schema 对不上（2026-11-23 14:57，线上 run 6cae5a4e 暴露，本地修）
+
+- 现象：线上真生成跑通并发布（app 7d89ca4c，5 分钟，eval 95 分），但模型生成的报名数据自带 `items`（购买内容）却没有 `slot`，顶层还多了 deadline/organizer/pickupInfo/title/description/status。`save_draft` 只校验不归一化（`validateData` 的 safeParse 结果被丢弃），原始输入原样进库；预览按模板字段渲染，结果购买内容看不到（备注列空白）、时间段列全是默认上午——和应用自带的“周五晚 18:30-20:30 自提”对不上。
+- 改了什么：① `TemplatesService.parseData`：返回解析后的数据（默认值补齐、未知字段去掉）；`validateData` 改走它。② signup schema 加 `items`（购买内容，可选，默认 ''），`fields` 和模板描述同步。③ `save_draft` 存解析后的数据，工具描述钉死数据形状（每个报名必须有 name/count，slot 必须是三个选项之一、按用户要求的自取时间选，building/phone/items/note 可选，不许自造其他字段）；两处 Stage B 提示（主流程 + Engineer 模式）同步加了同一句。④ `updateData`（PATCH）同样存解析后的数据。⑤ preview 名单加购买内容列；`items` 缺失默认空。
+- 测试：干净构建，56/56 单测全过（新增 3 个 parseData 测试：缺失字段补默认值、items 保留且未知字段去掉、非法时间段拒绝）。本地 HTTP 自测（端口 3110）：PATCH 模型风格数据（有 items、无 slot、带 deadline/organizer）→ 存下来的数据 slot 已补默认、items 保留、顶层多余字段去掉。
+- 注意：eval 发布后不是瞬间就有——回放刚发布时 eval 为 null，30 秒后才有（95 分）。因为 review agent 本身还要跑一次模型调用，算分在它返回后的 finally 里做；比原来“等模型调 compute_eval 好几分钟”快得多，且一定有。发布瞬间就有需要把 review 的模型调用和算分拆开，没做。

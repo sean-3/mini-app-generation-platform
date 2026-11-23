@@ -154,7 +154,7 @@ function Quote({ app, onSaved }: { app: AppRow; onSaved?: (a: AppRow) => void })
 /** 自取时间段选项。必须和 apps/api/src/templates/templates.service.ts 里的 SIGNUP_SLOTS 一致。 */
 const SLOTS = ['上午 09:00-11:00', '下午 16:00-18:00', '晚上 18:00-20:00'];
 
-type SignupRow = { id: string; name: string; count: number; note?: string; building?: string; slot?: string; phone?: string };
+type SignupRow = { id: string; name: string; count: number; note?: string; building?: string; slot?: string; phone?: string; items?: string };
 
 /** 手机号脱敏：前三后四，中间 ****；太短的直接原样显示（空即空）。 */
 const maskPhone = (p?: string) => (p && p.length >= 7 ? `${p.slice(0, 3)}****${p.slice(-4)}` : (p ?? ''));
@@ -169,12 +169,13 @@ function Signup({ app, onSaved, cap }: { app: AppRow; onSaved?: (a: AppRow) => v
   const [slot, setSlot] = useState(SLOTS[0]);
   const [note, setNote] = useState('');
   const [blocked, setBlocked] = useState(false);
-  // 向后兼容：老数据没有 building/slot/phone，缺失时给默认值（楼栋空、时间段第一项、手机空）。
+  // 向后兼容：老数据没有 building/slot/phone/items，缺失时给默认值（楼栋空、时间段第一项、手机空、购买内容空）。
   const signups = data.signups.map((p) => ({
     ...p,
     building: p.building ?? '',
     slot: p.slot && SLOTS.includes(p.slot) ? p.slot : SLOTS[0],
     phone: p.phone ?? '',
+    items: p.items ?? '',
   }));
   const total = signups.reduce((s, p) => s + p.count, 0);
   const remaining = Math.max(0, cap - total);
@@ -210,10 +211,10 @@ function Signup({ app, onSaved, cap }: { app: AppRow; onSaved?: (a: AppRow) => v
         <div className="kv" key={b.slot}><span>{b.slot}</span><span>{b.people} 人 · {b.count} 份</span></div>
       ))}
       <table className="data">
-        <thead><tr><th>#</th><th>姓名</th><th>楼栋房号</th><th>手机号</th><th>自取时间段</th><th>人数</th><th>备注</th></tr></thead>
+        <thead><tr><th>#</th><th>姓名</th><th>楼栋房号</th><th>手机号</th><th>自取时间段</th><th>人数</th><th>购买内容</th><th>备注</th></tr></thead>
         <tbody>
           {signups.map((p, i) => (
-            <tr key={p.id}><td>{i + 1}</td><td>{p.name}</td><td>{p.building}</td><td>{maskPhone(p.phone)}</td><td>{p.slot}</td><td>{p.count}</td><td>{p.note ?? ''}</td></tr>
+            <tr key={p.id}><td>{i + 1}</td><td>{p.name}</td><td>{p.building}</td><td>{maskPhone(p.phone)}</td><td>{p.slot}</td><td>{p.count}</td><td>{p.items}</td><td>{p.note ?? ''}</td></tr>
           ))}
         </tbody>
       </table>

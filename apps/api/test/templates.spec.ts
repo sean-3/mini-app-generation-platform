@@ -75,6 +75,41 @@ describe('TemplatesService', () => {
     expect(old.valid).toBe(true);
   });
 
+  it('signup: parseData applies defaults for missing optional fields', () => {
+    const r = svc.parseData('signup', {
+      signups: [{ id: 's1', name: '小明', count: 2 }],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.data.signups[0]).toMatchObject({
+      building: '',
+      slot: '上午 09:00-11:00',
+      phone: '',
+      items: '',
+      note: '',
+    });
+  });
+
+  it('signup: parseData keeps items and strips unknown keys', () => {
+    const r = svc.parseData('signup', {
+      signups: [{ id: 's1', name: '王姐', count: 2, building: '3栋502', slot: '晚上 18:00-20:00', phone: '138****2201', items: '草莓1盒', note: '', zzz: 1 }],
+      deadline: '本周四 22:00',
+      organizer: '刘阿姨',
+    });
+    expect(r.ok).toBe(true);
+    expect(r.data.signups[0].items).toBe('草莓1盒');
+    expect(r.data.signups[0].zzz).toBeUndefined();
+    expect(r.data.deadline).toBeUndefined();
+    expect(r.data.organizer).toBeUndefined();
+  });
+
+  it('signup: parseData rejects an invalid slot', () => {
+    const r = svc.parseData('signup', {
+      signups: [{ id: 's1', name: '小明', count: 1, slot: '半夜 00:00-01:00' }],
+    });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(' ')).toMatch(/slot/);
+  });
+
   it('signup: seed entries all carry building and a valid slot', () => {
     const data = svc.seedData('signup');
     expect(data.signups.length).toBe(6);

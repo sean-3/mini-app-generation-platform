@@ -1,7 +1,7 @@
 import { tool } from 'langchain';
 import { z } from 'zod';
 import { DatabaseService } from '../persistence/database.service';
-import { TemplatesService, type TemplateId } from '../templates/templates.service';
+import { TemplatesService, SIGNUP_SLOTS, type TemplateId } from '../templates/templates.service';
 import { EvalService } from '../eval/eval.service';
 import { randomUUID } from 'crypto';
 
@@ -61,8 +61,10 @@ export function buildTools(deps: {
       const t = templates.get(templateId);
       if (!t) return JSON.stringify({ isError: true, message: `unknown template ${templateId}` });
       const payload = data ?? t.seed();
-      const v = templates.validateData(templateId as TemplateId, payload);
-      if (!v.valid) return JSON.stringify({ isError: true, message: `seed data invalid: ${v.errors.join('; ')}` });
+      // 存解析后的数据：默认值补齐、未知字段去掉。只校验不归一化的话，
+      // 模型自造的字段会原样进库、缺失字段进库后预览按模板渲染对不上。
+      const parsed = templates.parseData(templateId as TemplateId, payload);
+      if (!parsed.ok) return JSON.stringify({ isError: true, message: `seed data invalid: ${parsed.errors.join('; ')}` });
       const id = randomUUID();
       const now = new Date().toISOString();
       db.run(
@@ -71,14 +73,18 @@ export function buildTools(deps: {
         runId,
         templateId,
         name,
-        JSON.stringify(payload),
+        JSON.stringify(parsed.data),
         now,
       );
       return JSON.stringify({ draftId: id, templateId, name });
     },
     {
       name: 'save_draft',
-      description: 'Save a generated app draft (template + seed data) to the drafts table.',
+      description:
+        'Save a generated app draft (template + seed data) to the drafts table. ' +
+        'If you supply data, it must follow the template fields exactly: every signup needs name (text) and count (positive integer); ' +
+        `slot must be one of ${SIGNUP_SLOTS.map((s) => `"${s}"`).join(', ')} — pick the one matching the pickup time in the user request; ` +
+        'building, phone, items (what they ordered), note are optional text. Do not invent other field names; do not add top-level fields beyond the template data.',
       schema: z.object({
         templateId: z.string(),
         name: z.string(),
