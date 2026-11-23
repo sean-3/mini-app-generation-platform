@@ -238,8 +238,8 @@ export function buildDeterministicScript(phase: string, ctx: DeterministicContex
 
     case 'review':
       return [
-        { type: 'tool', name: 'run_smoke_tests', args: () => ({ appId: ctx.appId ?? '' }) },
-        { type: 'tool', name: 'compute_eval', args: () => ({ runId: ctx.runId ?? '' }) },
+        { type: 'tool', name: 'run_smoke_tests', args: () => ({}) },
+        { type: 'tool', name: 'compute_eval', args: () => ({}) },
         { type: 'text', text: 'review done' },
       ];
 

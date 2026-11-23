@@ -160,3 +160,58 @@ Stage A 真模型工作正常：匹配 signup 模板、出需求 + 架构，3 �
 - 代码抽查：`createCloudModel()` 用 ChatOpenAI，模型 `kimi-k3`（`MOONSHOT_MODEL` 可改），`baseURL https://api.moonshot.cn/v1`，key 只从 `process.env.MOONSHOT_API_KEY` 读；确定性模型只在测试和工厂里出现，生产装配不传。
 - 真实 HTTP：`/health` 200（`configured:false`，model kimi-k3）；首页 200；`POST /api/runs` 400（`MOONSHOT_API_KEY 未设置`，消息写清了国内站 key 不能混用国际站）；repeat-demo 建 run 后 stopped，回放 3 条 trace——前两次 `match_template` 正常，第三次 `is_error=1` 被 `repeat_call` 拦下。
 - 仍未验证（同上）：真模型循环——本地没 key，部署后在 Railway 上配好 key 再验。
+
+## v4 线上复测成功（run 5bb54c6d，2026-11-23 02:21，Build / Team 关，真 Kimi 模型）
+
+主 agent 在 Railway 配好 `MOONSHOT_API_KEY` 后线上跑了一遍，整条主链路通了：
+
+- 发布成功，应用 f4d9039f（signup 模板 v1）已上线。
+- trace 共 10 条，全 ok；没有 ls / glob / grep，没有超时；`save_draft` 只调一次。
+- token 用量 13 次调用、43,006 token，随调用实时涨（usage 中间件每轮调用后累计）。
+- 唯一剩下的 bug：回放接口的 eval 一直是 null，尽管 trace 第 10 条 `compute_eval` 显示 ok。根因和修法见下一节。
+
+## v4 eval bug 修复（compute_eval 的 runId 服务端绑定）
+
+- **根因（已核实）**：`tools.ts` 里 `compute_eval` 的 runId 是模型传进来的参数，而模型并不知道当前 run 的 id（大概率传错/编了一个），eval 行写到了错误的 runId 下，`EvalService.latest(正确 runId)` 查不到，回放页 eval 一直是 null。`run_smoke_tests` 的 appId 同样是模型传的，有一样的隐患。
+- **修法**：runId 改成服务端绑定——`compute_eval` 的 schema 去掉 runId 字段，工具直接用 `buildTools` 闭包里的 runId；`run_smoke_tests` 的 appId 也一样，review 阶段由 `buildAgentParts(runId, { appId })` 把已发布应用的 id 传进来绑定（没绑定时仍接受模型传的 appId，其他阶段/测试用）。review 阶段的提示词收紧：两步编号、各只调一次、都不带参数。
+- **单测**：47/47（8 个 suite），新增 `test/tools-binding.spec.ts` 3 个——模型传错 runId 也写到正确 run 下（`latest(正确)` 非空、`latest(错误)` 为空）、绑定 appId 时模型传错 id 仍测对的应用、没绑定时模型传 appId 照常工作。确定性剧本的 review 一节同步改成无参数调用，e2e 仍走同一套阶段代码。
+- **真实 HTTP 自测（2026-11-23，端口 3104，无 key）**：`/health` 200（kimi-k3、`configured:false`）；首页 200；`POST /api/runs` 400（`MOONSHOT_API_KEY 未设置`）；repeat-demo 建 run 后 stopped，第 3 次调用被 `repeat_call` 拦下。真模型循环本地仍验证不了（没 key），不编造。
+- **线上复测时重点看**：新跑一遍 Build 生成，进回放页看 eval 是否出现、分数是否合理（成功率、步数、耗时三项都应大于 0）；再看 trace 里 `run_smoke_tests` 和 `compute_eval` 是否各只出现一次。
+
+## v5 前端重做（2026-11-23，apps/web 按 atoms.dev 实测界面重做）
+
+依据：`../atoms-ui-capture-2026-11-23.md`（2026-11-23 12:28–12:33 在 Xiao 的 Chrome 上只看不动，首页 + 项目页布局、尺寸、颜色、每个控件的位置和样子）。后端接口没动（api.ts 原样），只改 `apps/web/src/App.tsx` + `index.css`，preview.tsx 四个模板真实交互原样保留。
+
+改了什么：
+- 首页：左侧 350px 边栏（logo、工作区 Sean's Workspace、搜索框、导航 首页/项目/模板、底部用户区 sean）；中央 Agent 头像一排（Mike/Iris/Emma/Bob/Alex 重叠圆圈）；问候“你想创造什么？”32px；白色大圆角主输入框（960px、150px），左下角“+”（附件菜单）、右下角“更多 ∨”（团队模式开关默认关、使用模板创建列 4 个模板、深度研究置灰“未接”）、“构建 ∨”（构建/计划/Engineer 三行）、发送按钮；下方三个快捷药丸（接龙/记账/报价）+“查看全部模板”；再下方项目列表（模板占位图 + 标题 + 创建时间，点卡片进项目页）。
+- 项目页：最左侧 70px 图标窄栏；中间约 43% 聊天栏；右侧约 57% 预览区，顶部 64px 顶栏（项目标题下拉改名/删除、历史按钮点开版本列表、收起聊天框；中央分段控件 预览/概览/代码/回放；右侧移动/桌面切换、分享、蓝底圆形“发布”按钮）。
+- 聊天栏：顶部“持续构建”进度条卡（分段横条 + x/y，按 pipeline 步骤算）；用户消息右对齐白气泡；Agent 回复（头像 + 当前阶段的人名：Mike 协调 / Bob 架构 / Alex 工程师）；“✓ 已处理 N 步 ∨”可展开步骤列表，每步“灰色说明文字 + 下方浅灰圆角药丸按钮”，无竖向连线，步骤只来自回放 trace 的真实工具调用（kind='tool'），不编步骤；Agent 总结正文只写 run/app 里真实有的数据；“版本 N”卡片（标题 + 克隆按钮是样子）；两道审批卡在聊天栏里（架构/发布，批准/拒绝，拒绝回退）；底部固定 token 用量条（usage_json 的 token 数 + kimi-k3）+ 输入卡（占位文“让智能体团队实现你的想法”，发送后创建新 run，下方写明不会修改当前应用）。
+- 预览区：生成的应用占满（preview.tsx 真实交互）；底部中央悬浮白色药丸“设计工具”条（三个按钮是样子）；移动预览切换后预览变 480px 手机框。
+- 概览：应用名 + 模板描述、“发布你的 app”卡 + 发布按钮、列表卡（线上应用版本、评估分数、token 用量、导出 JSON）。
+- 代码：不伪造代码树，显示“应用数据 JSON”（只读、可复制）+ 本次 run 的工具调用 trace 列表，标题写清来源。
+- 回放：版本历史列表（listRuns），点一条重放该 run 的 trace + eval 分数（成功率、步数、耗时、token）。
+- 发布面板（点顶栏“发布”按钮弹出）：线上 URL 显示、复制链接、“将你的项目设为公开”开关（附注：本 Demo 链接一直公开，开关只做显示）、底部大号蓝色“发布”按钮——run 在 awaiting_publish 时点它就是确认发布，应用有未发布改动时点它就是 Update 发布新版，已发布且无改动时禁用。
+- 分享模态框：公开说明 + 复制链接（真）+ 导出 JSON（真）；私人分享置灰，写明未接。
+- 样式 tokens 按实测：背景 #FAFAF8，卡片纯白、1px #E7E5E4 边框、圆角 12–24px；主色 #2563EB，选中标签浅蓝底 #EAF0FF 配蓝字；正文 #111，次要 #6B7280。
+
+自测（2026-11-23，端口 3107，DATA_DIR=/tmp/v5verify-data，无 key）：
+- 干净构建：api + web 都通过；单测 47/47（8 个 suite，后端没动）。
+- 打包产物核对：新 JS bundle 里有“你想创造什么”“持续构建”“应用数据 JSON”“选择元素”；新 CSS 里有 #FAFAF8；首页 200，引用的 JS/CSS hash 与新构建一致。
+- 真实 HTTP：`/health` 200（kimi-k3，configured:false）；`GET /api/templates` 返回 4 个模板；`POST /api/runs` 无 key 仍 400；`POST /api/apps`（signup）建应用成功；PATCH 改数据成功；POST update 发布 v1 成功；POST export 返回该应用 JSON；repeat-demo 建 run 后 stopped，回放 3 条 trace，第 3 次 `match_template` 被拦（is_error=1），eval 为 null（repeat-demo 不跑 review，符合预期）。
+- 前端流程覆盖：完整生成 + 两道审批 + 发布 + 回放 eval 由确定性单测 e2e 覆盖（47/47 里含 full run → published + eval 落库）；本次没走真模型（本地没 key），不编造“已验证真模型前端流程”。
+
+### 样子按钮 / 未接清单（点了一律 toast“未接”，不做假功能）
+
+- 首页边栏：底部用户区（sean，未接账号）、铃铛、齿轮设置；导航“模板”只打开模板选择菜单（选模板填输入框，是真的）。
+- 首页输入框：语音图标、附件“+”菜单里的上传文件/上传文件夹、深度研究（置灰“未接”）。
+- 项目页窄栏：用户头像、齿轮、铃铛、“展开侧边栏”。
+- 预览区“设计工具”条：选择元素、修改文本、主题（三个都是样子）。
+- 版本卡片：克隆按钮（样子）；复制链接是真的。
+- 分享框：私人分享 Pro+（置灰，未接）。
+- 发布面板：“将你的项目设为公开”开关只做显示（本 Demo 链接一直公开）。
+
+### 没验证的
+
+- 浏览器点击级自测（本机没有可用的浏览器操作入口）：首页输入 → 生成 → 两道审批 → 发布 → 各 tab 切换 → 分享/发布面板的完整点一遍流程，没点过。部署后主 agent 用浏览器点一遍。
+- 360px 真机检查：只做了静态核对（≤760px 单列、边栏变顶栏、窄栏隐藏、面板/模态框 max-width 100%、手机框 max-width 100%、菜单 min-width 300px 在 360px 视口内放得下），没在真机上量过。
+- 真模型循环本地仍验证不了（没 key），同 v4。

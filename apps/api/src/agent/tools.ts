@@ -14,8 +14,10 @@ export function buildTools(deps: {
   templates: TemplatesService;
   evalService: EvalService;
   runId: string;
+  /** review 阶段已发布应用的 id；传了就绑定，模型传什么都不采用。 */
+  appId?: string;
 }) {
-  const { db, templates, evalService, runId } = deps;
+  const { db, templates, evalService, runId, appId: boundAppId } = deps;
 
   const matchTemplate = tool(
     async ({ input }: { input: string }) => {
@@ -129,10 +131,14 @@ export function buildTools(deps: {
   );
 
   const runSmokeTests = tool(
-    async ({ appId }: { appId: string }) => {
+    async (args: { appId?: string }) => {
+      // appId 服务端绑定：review 阶段传已发布应用的 id；模型传什么都不采用。
+      // 没绑定时才用模型传的 appId（其他阶段 / 测试用）。
+      const id = boundAppId ?? args.appId;
+      if (!id) return JSON.stringify({ passed: false, checks: [{ name: 'app exists', ok: false }] });
       const row = db.get<{ template_id: string; data_json: string }>(
         'SELECT template_id, data_json FROM apps WHERE id = ?',
-        appId,
+        id,
       );
       if (!row) return JSON.stringify({ passed: false, checks: [{ name: 'app exists', ok: false }] });
       const v = templates.validateData(row.template_id as TemplateId, JSON.parse(row.data_json));
@@ -145,20 +151,24 @@ export function buildTools(deps: {
     },
     {
       name: 'run_smoke_tests',
-      description: 'Run smoke tests (existence, schema, render) for a published app.',
-      schema: z.object({ appId: z.string() }),
+      description: boundAppId
+        ? 'Run smoke tests (existence, schema, render) for the published app. No arguments needed: the app is already bound by the server.'
+        : 'Run smoke tests (existence, schema, render) for a published app.',
+      schema: boundAppId ? z.object({}) : z.object({ appId: z.string() }),
     },
   );
 
   const computeEval = tool(
-    async ({ runId }: { runId: string }) => {
+    async () => {
+      // runId 服务端绑定：模型不知道当前 run 的 id，传进来的值不可信
+      // （线上实测 run 5bb54c6d：模型传错 runId，eval 写到了别的 run 下，回放页查不到）。
       const e = evalService.compute(runId);
       return JSON.stringify(e);
     },
     {
       name: 'compute_eval',
-      description: 'Compute the evaluation score (success rate / steps / duration) for a run.',
-      schema: z.object({ runId: z.string() }),
+      description: 'Compute the evaluation score (success rate / steps / duration) for the current run. No arguments needed: the run is already bound by the server.',
+      schema: z.object({}),
     },
   );
 

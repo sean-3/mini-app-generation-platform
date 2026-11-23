@@ -617,7 +617,7 @@ export class AgentService {
   }
 
   private async executeReview(runId: string, appId: string): Promise<void> {
-    const { middleware, usageMiddleware, tools } = this.buildAgentParts(runId);
+    const { middleware, usageMiddleware, tools } = this.buildAgentParts(runId, { appId });
     const toolList = Object.values(tools);
 
     const agent = createDeepAgent({
@@ -625,7 +625,10 @@ export class AgentService {
       tools: toolList,
       middleware: [middleware, usageMiddleware, todoListMiddleware()],
       systemPrompt:
-        'You are Mike, the team coordinator. Call run_smoke_tests with the appId, then compute_eval with the runId, then reply with ONLY the text: review done' +
+        'You are Mike, the team coordinator. Do these steps in order, each exactly once:\n' +
+        '1. Call run_smoke_tests (no arguments — the published app is already bound).\n' +
+        '2. Call compute_eval (no arguments — the current run is already bound).\n' +
+        '3. Reply with ONLY the text: review done' +
         toolRules(['run_smoke_tests', 'compute_eval']),
     });
     await agent.invoke({ messages: [new HumanMessage('post-publish review')] });
@@ -635,14 +638,14 @@ export class AgentService {
 
   // ---------------- helpers ----------------
 
-  private buildAgentParts(runId: string) {
+  private buildAgentParts(runId: string, opts: { appId?: string } = {}) {
     const gateway = this.gatewayService.createGateway((t: GatewayTrace) => {
       this.recordTrace(runId, 'ToolGateway', 'tool', t.tool, null, JSON.stringify({ step: t.step, outcome: t.outcome, detail: t.detail }), t.outcome === 'blocked', t.durationMs);
       this.hub.emit(runId, 'tool', 'ToolGateway', t);
     });
     const middleware = createToolGatewayMiddleware(gateway);
     const usageMiddleware = this.createUsageMiddleware(runId);
-    const tools = buildTools({ db: this.db, templates: this.templates, evalService: this.evalService, runId });
+    const tools = buildTools({ db: this.db, templates: this.templates, evalService: this.evalService, runId, appId: opts.appId });
     return { gateway, middleware, usageMiddleware, tools };
   }
 
